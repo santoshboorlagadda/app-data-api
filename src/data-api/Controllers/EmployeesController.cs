@@ -21,6 +21,7 @@ public class EmployeesController : ControllerBase
     [HttpGet]
     [ProducesResponseType(typeof(PagedResult<EmployeeDto>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status500InternalServerError)]
     public async Task<ActionResult<PagedResult<EmployeeDto>>> GetAll(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 100,
