@@ -1,0 +1,46 @@
+{
+  "manifest_version": "1.0",
+  "generated_at": "2026-03-24T00:00:00.000Z",
+  "pipeline_run_id": "00000000-0000-0000-0000-000000000000",
+  "pr": {
+    "title": "Create data-api .NET 6 Web API with PostgreSQL employees endpoint",
+    "branch": "feature/data-api-initial",
+    "target_branch": "develop",
+    "story_type": "new_application",
+    "complexity": "medium"
+  },
+  "story": {
+    "user_story": "As a developer, I want to create a .NET Core Web API named data-api that connects to a PostgreSQL database (mysample) and retrieves data from the employees table, so that other applications can consume employee information via REST endpoints.",
+    "acceptance_criteria": [
+      "A new .NET Core Web API project named data-api is created.",
+      "The API should connect to a PostgreSQL database named mysample.",
+      "A table named employees exists in the database.",
+      "Entity Framework Core is used for database interaction.",
+      "A DbContext is configured for PostgreSQL.",
+      "An Employee entity model is created based on the employees table.",
+      "A repository or service layer is implemented to fetch employee data.",
+      "A controller (EmployeesController) is created with the following endpoint: GET /api/employees → returns all employee records.",
+      "Proper dependency injection is configured.",
+      "The API returns data in JSON format.",
+      "Basic error handling and logging are implemented."
+    ]
+  },
+  "context": {
+    "repo_url": "https://github.com/santoshboorlagadda/app-data-api",
+    "target_branch": "develop",
+    "repo_type": "new",
+    "proj_md_found": true,
+    "proj_md_used": true
+  },
+  "coding_agent": {
+    "status": "complete",
+    "build": "passed",
+    "tests": "passed",
+    "notes": [
+      "Implemented .NET 6 Web API under src/data-api with EF Core (DB-first style) MysampleContext + Employee model.",
+      "Added repository/service layers with paging + filtering contract and JSON envelope.",
+      "Added Serilog JSON console logging and global exception middleware.",
+      "Added MSTest unit tests for repository/service/controller and Dockerfile copying certs."
+    ]
+  }
+}

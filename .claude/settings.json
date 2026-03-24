@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/pre-tool-use.py"
+          }
+        ]
+      }
+    ]
+  },
+  "skills": {
+    "sources": ["project"]
+  }
+}

@@ -1,0 +1,25 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31912.275
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "data-api", "src\data-api\data-api.csproj", "{B7AC53AB-2D74-4B85-8D1D-9E59C97530A9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "data-api.Tests", "tests\data-api.Tests\data-api.Tests.csproj", "{0CE8EBF8-0C10-4C2D-AEA5-E0BCF5947207}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B7AC53AB-2D74-4B85-8D1D-9E59C97530A9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B7AC53AB-2D74-4B85-8D1D-9E59C97530A9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B7AC53AB-2D74-4B85-8D1D-9E59C97530A9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B7AC53AB-2D74-4B85-8D1D-9E59C97530A9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0CE8EBF8-0C10-4C2D-AEA5-E0BCF5947207}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0CE8EBF8-0C10-4C2D-AEA5-E0BCF5947207}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0CE8EBF8-0C10-4C2D-AEA5-E0BCF5947207}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0CE8EBF8-0C10-4C2D-AEA5-E0BCF5947207}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
