@@ -40,13 +40,13 @@ From repo root:
 - Run (dev): `dotnet run --project src/data-api/DataApi.csproj`
 
 ### EF Core DB-First Scaffolding (PostgreSQL)
-Scaffold `public.employees` from DB `mysample`:
+Scaffold `public.employees` from DB `mysample` (do not commit secrets in the scaffold command):
 - `dotnet tool install --global dotnet-ef --version 6.*` (if needed)
 - Example scaffold (adjust host/user/pass in command):
-  - `dotnet ef dbcontext scaffold "Host=mydb.aws.com;Port=5432;Database=mysample;Username=postgres;Password=postgres@123;SslMode=Require" Npgsql.EntityFrameworkCore.PostgreSQL --project src/data-api/DataApi.csproj --output-dir Models --context-dir Data --context AppDbContext --schema public --table employees --use-database-names --no-onconfiguring --force`
+  - `dotnet ef dbcontext scaffold "Host=mydb.aws.com;Port=5432;Database=mysample;Username=postgres;Password=<REDACTED>;SslMode=Require" Npgsql.EntityFrameworkCore.PostgreSQL --project src/data-api/DataApi.csproj --output-dir Models --context-dir Data --context AppDbContext --schema public --table employees --use-database-names --no-onconfiguring --force`
 
 Notes:
-- Connection string is stored in `src/data-api/appsettings.json` (per requirement).
+- Connection string is stored in `src/data-api/appsettings.json` (per requirement). Do not commit passwords; use env vars/user-secrets.
 - Migrations are not planned (schema is managed externally / DB-first).
 
 ## Database
@@ -101,12 +101,4 @@ Notes:
 - Do not add authentication/authorization.
 - Do not introduce CQRS/mediator frameworks.
 - Keep endpoint contract and pagination response shape exact.
-- Use DB-first scaffolding approach for EF entities.
-- Unit tests required for controller, service, and repository (repository tests may mock DbContext/DbSet).
-- Swagger must be enabled in all environments.
-
-## Do Not Touch
-- None specified (repo is currently empty). If CI/CD files are later added, do not modify them without explicit instruction.
-
-## Pattern References
-- None yet (greenfield repo).
+- Use DB-first scaffolding approach for models.
