@@ -1,91 +1,39 @@
 {
   "manifest_version": "1.0",
-  "generated_at": "2026-03-24T00:00:00Z",
-  "pipeline_run_id": "00000000-0000-0000-0000-000000000000",
+  "generated_at": "2026-04-22T00:00:00Z",
+  "pipeline_run_id": "6d6d6bdf-3c33-4b0d-bac0-4f6f08f9c046",
   "pr": {
-    "title": "Create DataApi .NET 6 Web API with employees endpoint",
-    "branch": "feature/data-api-employees",
+    "title": "Upgrade data-api to .NET 8 and update NuGet dependencies",
+    "branch": "feature/upgrade-dotnet8",
     "target_branch": "develop",
-    "story_type": "new_application",
+    "story_type": "refactor",
     "complexity": "medium"
   },
   "story": {
-    "user_story": "As a developer, I want to create a .NET Core Web API named data-api that connects to a PostgreSQL database (mysample) and retrieves data from the employees table, so that other applications can consume employee information via REST endpoints.",
+    "user_story": "As a developer, I want to upgrade the existing .NET Web API (data-api) to .NET 8, analyze the current implementation, and update all dependent packages, so that the application benefits from improved performance, security, and modern .NET capabilities.",
     "acceptance_criteria": [
-      "A new .NET Core Web API project named data-api is created.",
-      "The API should connect to a PostgreSQL database named mysample.",
-      "A table named employees exists in the database.",
-      "Entity Framework Core is used for database interaction.",
-      "A DbContext is configured for PostgreSQL.",
-      "An Employee entity model is created based on the employees table.",
-      "A repository or service layer is implemented to fetch employee data.",
-      "A controller (EmployeesController) is created with the following endpoint: GET /api/employees → returns all employee records.",
-      "Proper dependency injection is configured.",
-      "The API returns data in JSON format.",
-      "Basic error handling and logging are implemented."
+      "The existing data-api project is upgraded to .NET 8.",
+      "All project files (.csproj) reflect TargetFramework as net8.0.",
+      "Existing code is analyzed for compatibility issues and refactored if required.",
+      "Deprecated APIs (if any) are replaced with supported alternatives.",
+      "All NuGet packages are upgraded to their latest stable versions compatible with .NET 8.",
+      "Entity Framework Core is upgraded to EF Core 8 (if used).",
+      "PostgreSQL provider (Npgsql) is upgraded to a compatible version.",
+      "Application builds successfully without warnings or errors.",
+      "All existing endpoints (e.g., GET /api/employees) work as expected after upgrade.",
+      "Regression testing is completed to ensure no functional breakage."
     ]
   },
-  "context": {
-    "repo_url": "https://github.com/santoshboorlagadda/app-data-api",
-    "target_branch": "develop",
-    "repo_type": "new",
-    "proj_md_found": false,
-    "proj_md_used": false
-  },
-  "analysis": {
-    "detected_stack": {
-      "language": "C#",
-      "framework": "ASP.NET Core Web API (Controllers)",
-      "version": ".NET 6",
-      "test_framework": "MSTest",
-      "orm": "Entity Framework Core (Npgsql)",
-      "auth": null,
-      "source": "user_input"
-    },
-    "gaps_found": [
-      "Repo structure and project layout",
-      ".NET version",
-      "DB connection management",
-      "Employees schema details",
-      "Pagination contract details",
-      "Swagger/logging/error handling requirements",
-      "Docker ports/HTTPS expectations",
-      "Testing scope/framework"
-    ],
-    "gaps_resolved": [
-      "Repo is empty; create single API project under src/data-api plus tests under tests/",
-      "Use .NET 6",
-      "Connection string stored in appsettings.json without password; inject secrets via env vars/user-secrets",
-      "DB host mydb.aws.com port 5432 user postgres db mysample; SslMode=Require; cert handling skipped for now",
-      "Table public.employees with emp_id INT identity PK and emp_name VARCHAR(255) NULL",
-      "Endpoint GET /api/v1/employees with pagination default page=1 pageSize=100; 400 on invalid; sort by emp_id asc; response envelope required; 200 with empty items",
-      "Swagger enabled in all environments; Serilog JSON console logs; global exception handler with custom error JSON; controller try/catch also requested",
-      "Docker deployment with Dockerfile; expose 5000 HTTP and 5001 HTTPS (cert configuration TBD)",
-      "MSTest + Moq; unit tests for controller, service, repository"
-    ]
-  },
-  "clarification_log": [
-    {
-      "category": "REPO / BASELINE",
-      "question": "Is the repository empty or existing, and where should the project live?",
-      "answer": "Empty repo; create a single project under src/data-api with tests under tests/."
-    },
-    {
-      "category": "STACK",
-      "question": "What .NET version and API style?",
-      "answer": ".NET 6; Controllers with EmployeesController; no auth; no CQRS."
-    },
-    {
-      "category": "DATABASE",
-      "question": "Provide DB connection details and SSL requirements.",
-      "answer": "Host=mydb.aws.com;Port=5432;Database=mysample;Username=postgres;Password=<REDACTED>;SslMode=Require; appsettings.json only; cert handling skipped for now."
-    }
-  ],
   "coding_agent": {
-    "review_finding_fixes": [
-      "Removed hardcoded DB password from appsettings.json; dev settings now expect password via env var placeholder.",
-      "Added bounded pagination validation (max pageSize=200) to reduce scraping/DoS risk.",
-      "Enabled HTTPS redirection and HSTS (non-development) and added restrictive CORS policy placeholder."
+    "status": "complete",
+    "completed_at": "2026-04-22T00:00:00Z",
+    "build": "passed",
+    "tests": "passed",
+    "notes": [
+      "Upgraded all projects to net8.0.",
+      "Upgraded EF Core to 8.x and Npgsql provider to 8.x.",
+      "Updated Dockerfile base images to .NET 8.",
+      "Removed WeatherForecast template controller/model per proj.md instructions."
     ]
   }
 }
