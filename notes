@@ -1,0 +1,21 @@
+cd C:\path\to\your\backend-folder
+python -m venv .venv
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy env.example.txt .env
+copy apps.sample.json apps.json
+notepad .env
+notepad runtimes.json
+uvicorn app:app --reload
+
+Second terminal:
+
+npm create vite@latest agentic-portal -- --template react
+cd agentic-portal
+npm install
+npm install lucide-react
+npm install tailwindcss @tailwindcss/postcss postcss
+notepad src\App.jsx
+notepad src\index.css
+npm run dev
