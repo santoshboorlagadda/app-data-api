@@ -1,0 +1,34 @@
+# Build/manifest files sent to the agent. Dockerfiles are INCLUDED — the upgrade must
+# change the FROM base/build images too, and the agent can only edit what it can see.
+MANIFEST_PATTERNS = [
+    "*.csproj", "*.fsproj", "*.vbproj", "global.json", "Directory.Build.props", "nuget.config",
+    "package.json", ".nvmrc", "pom.xml", "build.gradle",
+    "Dockerfile", "Dockerfile.*", "*.Dockerfile", "docker-compose*.yml", ".dockerignore",
+]
+
+
+def _manifests(repo: Path) -> str:
+    blocks, seen = [], set()
+    for pat in MANIFEST_PATTERNS:
+        for p in repo.rglob(pat):
+            if ".git" in p.parts or "node_modules" in p.parts or p in seen or not p.is_file():
+                continue
+            seen.add(p)
+            blocks.append(f"### {p.relative_to(repo)}\n{p.read_text(errors='ignore')[:6000]}")
+    return "\n\n".join(blocks)
+
+
+        central = ("\n\nUse these EXACT values (from the platform base-image registry).\n"
+                   "In the Dockerfile: replace ONLY the image reference in the FROM lines "
+                   "(runtime stage -> base image, sdk/build stage -> build image) and keep "
+                   "every other line exactly as-is — certificates, microdnf steps, COPY, "
+                   "ENTRYPOINT, USER, labels, args. Do not rewrite or reorder the Dockerfile.\n"
+
+
+    "  4. MODIFY SOURCE CODE where the upgrade requires it: fix breaking API changes, obsolete "
+    "     APIs, changed namespaces, nullable/async changes, etc.\n"
+    "  5. UPDATE THE DOCKERFILE: point the FROM lines at the new base/build images for the "
+    "     target version. Change ONLY the image references — preserve every other instruction "
+    "     (certificates, package installs, COPY, USER, ENTRYPOINT, ARG, labels) verbatim.\n"
+
+
