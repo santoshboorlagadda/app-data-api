@@ -31,4 +31,31 @@ def _manifests(repo: Path) -> str:
     "     target version. Change ONLY the image references — preserve every other instruction "
     "     (certificates, package installs, COPY, USER, ENTRYPOINT, ARG, labels) verbatim.\n"
 
+class UpgradeIn(BaseModel):
+    app_id: str
+    target_version: Optional[str] = None   # version number, e.g. "10" — required
+
+
+@app.post("/api/upgrades")
+async def start_upgrade(body: UpgradeIn, bg: BackgroundTasks) -> dict:
+    """Upgrade ONE app. Base images come from base_images.json, same as Upgrade All."""
+    a = APPS.get(body.app_id)
+    if not a:
+        raise HTTPException(404, "Unknown app")
+    if not body.target_version:
+        raise HTTPException(400, "target_version is required (e.g. \"10\").")
+
+    imgs = catalog.image_set(a.type, body.target_version)
+    if not imgs:
+        raise HTTPException(400, f"No base image configured for {a.type} {body.target_version}.")
+    if _same_version(a.current_version, body.target_version):
+        raise HTTPException(400, f"{a.name} is already on {body.target_version}.")
+
+    job = {"id": str(uuid.uuid4()), "kind": "upgrade", "app_id": a.id, "app_name": a.name,
+           "target_version": f"{a.type} {body.target_version}", "state": "queued",
+           "stages": [], "build_no": None, "images": imgs}
+    JOBS[job["id"]] = job
+    bg.add_task(_run_upgrade_task, job, {**a.model_dump(), "images": imgs,
+                                         "target_version_num": body.target_version})
+    return job
 
