@@ -1,130 +1,221 @@
-# Schema snapshot queries
+#!/usr/bin/env python3
+"""
+Dump database schema to a markdown snapshot the design agent can read.
 
-Run the query for your provider with a **read-only** login, save the output under `/docs/db/`
-(e.g. `schema.sqlserver.md`), and commit it. That file is what the agent reads for objects that are
-not in the DbContext. Re-run it whenever the schema changes — put it in a nightly job or a pre-release
-step so it does not go stale.
+Credentials come from environment variables only. Nothing secret is printed,
+logged, or written to the output file.
 
-Add a header line to the file when you commit it:
+    export DB_PROVIDER=sqlserver|postgres|oracle
+    export DB_HOST=...            # for oracle: use DB_DSN instead
+    export DB_PORT=...
+    export DB_NAME=...            # oracle: service name, if not using DB_DSN
+    export DB_USER=...            # a READ-ONLY account
+    export DB_PASSWORD=...
+    export DB_DSN=...             # optional, oracle: host:port/service
 
-```
-Generated: 2026-08-10  |  Provider: SQL Server 2019  |  Database: TradeStore
-```
+    python scripts/dump_schema.py                       # whole schema
+    python scripts/dump_schema.py --objects Trades,Book  # only these objects
+    python scripts/dump_schema.py --out docs/db/schema.sqlserver.md
 
----
+Drivers (install only the one you need):
+    sqlserver -> pyodbc          postgres -> psycopg[binary]        oracle -> oracledb
+"""
+import argparse
+import datetime as dt
+import os
+import sys
 
-## SQL Server
+QUERIES = {
+    "sqlserver": {
+        "columns": """
+            SELECT s.name, t.name, t.type_desc, c.name, ty.name,
+                   c.max_length, c.precision, c.scale, c.is_nullable
+            FROM sys.objects t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.columns c ON c.object_id = t.object_id
+            JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+            WHERE t.type IN ('U','V')
+            ORDER BY s.name, t.name, c.column_id""",
+        "indexes": """
+            SELECT s.name, t.name, i.name, i.type_desc, i.is_unique, i.is_primary_key,
+                   STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal)
+            FROM sys.indexes i
+            JOIN sys.tables t ON t.object_id = i.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+            JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+            WHERE i.type > 0
+            GROUP BY s.name, t.name, i.name, i.type_desc, i.is_unique, i.is_primary_key""",
+        "foreign_keys": """
+            SELECT fk.name, OBJECT_NAME(fk.parent_object_id), OBJECT_NAME(fk.referenced_object_id)
+            FROM sys.foreign_keys fk""",
+        "row_counts": """
+            SELECT s.name, t.name, SUM(p.rows)
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0,1)
+            GROUP BY s.name, t.name
+            ORDER BY SUM(p.rows) DESC""",
+    },
+    "postgres": {
+        "columns": """
+            SELECT c.table_schema, c.table_name, t.table_type, c.column_name, c.data_type,
+                   c.character_maximum_length, c.numeric_precision, c.numeric_scale, c.is_nullable
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+            WHERE c.table_schema NOT IN ('pg_catalog','information_schema')
+            ORDER BY c.table_schema, c.table_name, c.ordinal_position""",
+        "indexes": """
+            SELECT schemaname, tablename, indexname, indexdef
+            FROM pg_indexes
+            WHERE schemaname NOT IN ('pg_catalog','information_schema')
+            ORDER BY schemaname, tablename""",
+        "foreign_keys": """
+            SELECT tc.constraint_name, tc.table_name, ccu.table_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_name = tc.constraint_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'""",
+        "row_counts": """
+            SELECT schemaname, relname, n_live_tup
+            FROM pg_stat_user_tables
+            ORDER BY n_live_tup DESC""",
+    },
+    "oracle": {
+        "columns": """
+            SELECT o.owner, c.table_name, o.object_type, c.column_name, c.data_type,
+                   c.data_length, c.data_precision, c.data_scale, c.nullable
+            FROM user_tab_columns c
+            JOIN user_objects o ON o.object_name = c.table_name
+            WHERE o.object_type IN ('TABLE','VIEW','MATERIALIZED VIEW')
+            ORDER BY c.table_name, c.column_id""",
+        "indexes": """
+            SELECT i.table_name, i.index_name, i.uniqueness,
+                   LISTAGG(c.column_name, ',') WITHIN GROUP (ORDER BY c.column_position)
+            FROM user_indexes i
+            JOIN user_ind_columns c ON c.index_name = i.index_name
+            GROUP BY i.table_name, i.index_name, i.uniqueness""",
+        "foreign_keys": """
+            SELECT c.constraint_name, c.table_name, c.r_constraint_name
+            FROM user_constraints c
+            WHERE c.constraint_type = 'R'""",
+        "row_counts": """
+            SELECT table_name, num_rows, last_analyzed
+            FROM user_tables
+            ORDER BY num_rows DESC""",
+    },
+}
 
-```sql
--- Columns
-SELECT s.name AS [schema], t.name AS [object], t.type_desc AS [kind],
-       c.name AS [column], ty.name AS [type], c.max_length, c.precision, c.scale, c.is_nullable
-FROM sys.objects t
-JOIN sys.schemas s   ON s.schema_id = t.schema_id
-JOIN sys.columns c   ON c.object_id = t.object_id
-JOIN sys.types ty    ON ty.user_type_id = c.user_type_id
-WHERE t.type IN ('U','V')
-ORDER BY s.name, t.name, c.column_id;
 
--- Indexes and keys
-SELECT s.name AS [schema], t.name AS [table], i.name AS [index], i.type_desc,
-       i.is_unique, i.is_primary_key,
-       STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS [columns]
-FROM sys.indexes i
-JOIN sys.tables t        ON t.object_id = i.object_id
-JOIN sys.schemas s       ON s.schema_id = t.schema_id
-JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-JOIN sys.columns c        ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-WHERE i.type > 0
-GROUP BY s.name, t.name, i.name, i.type_desc, i.is_unique, i.is_primary_key;
+def env(name, required=True):
+    value = os.environ.get(name)
+    if required and not value:
+        sys.exit(
+            f"Missing environment variable {name}. "
+            "Set the DB_* variables for a read-only account and re-run. "
+            "Do not pass credentials on the command line."
+        )
+    return value
 
--- Foreign keys
-SELECT fk.name, OBJECT_NAME(fk.parent_object_id) AS [from_table],
-       OBJECT_NAME(fk.referenced_object_id) AS [to_table]
-FROM sys.foreign_keys fk;
 
--- Approximate row counts
-SELECT s.name AS [schema], t.name AS [table], SUM(p.rows) AS [approx_rows]
-FROM sys.tables t
-JOIN sys.schemas s    ON s.schema_id = t.schema_id
-JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0,1)
-GROUP BY s.name, t.name
-ORDER BY SUM(p.rows) DESC;
-```
+def connect(provider):
+    user, password = env("DB_USER"), env("DB_PASSWORD")
+    if provider == "sqlserver":
+        import pyodbc
+        host, db = env("DB_HOST"), env("DB_NAME")
+        port = os.environ.get("DB_PORT", "1433")
+        return pyodbc.connect(
+            f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={host},{port};"
+            f"DATABASE={db};UID={user};PWD={password};TrustServerCertificate=yes",
+            readonly=True,
+        )
+    if provider == "postgres":
+        import psycopg
+        return psycopg.connect(
+            host=env("DB_HOST"), port=os.environ.get("DB_PORT", "5432"),
+            dbname=env("DB_NAME"), user=user, password=password,
+        )
+    if provider == "oracle":
+        import oracledb
+        dsn = os.environ.get("DB_DSN") or f"{env('DB_HOST')}:{os.environ.get('DB_PORT','1521')}/{env('DB_NAME')}"
+        return oracledb.connect(user=user, password=password, dsn=dsn)
+    sys.exit(f"Unknown provider: {provider}")
 
----
 
-## PostgreSQL
+def run(conn, sql):
+    cur = conn.cursor()
+    cur.execute(sql)
+    rows = cur.fetchall()
+    cur.close()
+    return rows
 
-```sql
--- Columns
-SELECT table_schema, table_name, column_name, data_type,
-       character_maximum_length, numeric_precision, numeric_scale, is_nullable
-FROM information_schema.columns
-WHERE table_schema NOT IN ('pg_catalog','information_schema')
-ORDER BY table_schema, table_name, ordinal_position;
 
--- Object kinds (table vs view)
-SELECT table_schema, table_name, table_type
-FROM information_schema.tables
-WHERE table_schema NOT IN ('pg_catalog','information_schema');
+def keep(row, objects):
+    if not objects:
+        return True
+    return any(str(cell).upper() in objects for cell in row[:3] if cell is not None)
 
--- Indexes
-SELECT schemaname, tablename, indexname, indexdef
-FROM pg_indexes
-WHERE schemaname NOT IN ('pg_catalog','information_schema')
-ORDER BY schemaname, tablename;
 
--- Keys and foreign keys
-SELECT tc.table_schema, tc.table_name, tc.constraint_type, tc.constraint_name,
-       kcu.column_name, ccu.table_name AS references_table
-FROM information_schema.table_constraints tc
-LEFT JOIN information_schema.key_column_usage kcu
-       ON kcu.constraint_name = tc.constraint_name
-LEFT JOIN information_schema.constraint_column_usage ccu
-       ON ccu.constraint_name = tc.constraint_name AND tc.constraint_type = 'FOREIGN KEY'
-WHERE tc.table_schema NOT IN ('pg_catalog','information_schema');
+def table(rows, headers):
+    if not rows:
+        return "_none_\n"
+    out = ["| " + " | ".join(headers) + " |",
+           "|" + "|".join(["---"] * len(headers)) + "|"]
+    for r in rows:
+        out.append("| " + " | ".join("" if c is None else str(c) for c in r) + " |")
+    return "\n".join(out) + "\n"
 
--- Approximate row counts (needs recent ANALYZE)
-SELECT schemaname, relname, n_live_tup AS approx_rows
-FROM pg_stat_user_tables
-ORDER BY n_live_tup DESC;
-```
 
----
+HEADERS = {
+    "columns": ["schema", "object", "kind", "column", "type", "length", "precision", "scale", "nullable"],
+    "indexes": ["a", "b", "c", "d", "e", "f", "g"],
+    "foreign_keys": ["constraint", "from", "to"],
+    "row_counts": ["a", "b", "c"],
+}
 
-## Oracle
 
-Use `ALL_*` views if the objects live in another schema; swap `USER_` for `ALL_` and filter on
-`OWNER`.
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--provider", default=os.environ.get("DB_PROVIDER"))
+    p.add_argument("--objects", help="comma separated table/view names to include")
+    p.add_argument("--out")
+    args = p.parse_args()
 
-```sql
--- Columns
-SELECT table_name, column_name, data_type, data_length, data_precision, data_scale, nullable
-FROM   user_tab_columns
-ORDER  BY table_name, column_id;
+    provider = (args.provider or "").lower()
+    if provider not in QUERIES:
+        sys.exit("Set DB_PROVIDER or --provider to one of: sqlserver, postgres, oracle")
 
--- Object kinds
-SELECT object_name, object_type
-FROM   user_objects
-WHERE  object_type IN ('TABLE','VIEW','MATERIALIZED VIEW');
+    objects = {o.strip().upper() for o in args.objects.split(",")} if args.objects else None
+    out_path = args.out or f"docs/db/schema.{provider}.md"
 
--- Indexes
-SELECT i.index_name, i.table_name, i.uniqueness,
-       LISTAGG(c.column_name, ',') WITHIN GROUP (ORDER BY c.column_position) AS columns
-FROM   user_indexes i
-JOIN   user_ind_columns c ON c.index_name = i.index_name
-GROUP  BY i.index_name, i.table_name, i.uniqueness;
+    conn = connect(provider)
+    sections = {}
+    for key, sql in QUERIES[provider].items():
+        rows = [r for r in run(conn, sql) if keep(r, objects)]
+        sections[key] = rows
+    conn.close()
 
--- Keys and foreign keys
-SELECT c.constraint_name, c.table_name, c.constraint_type,
-       cc.column_name, c.r_constraint_name
-FROM   user_constraints c
-JOIN   user_cons_columns cc ON cc.constraint_name = c.constraint_name
-WHERE  c.constraint_type IN ('P','R','U');
+    generated = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    body = [
+        f"# Schema snapshot — {provider}",
+        "",
+        f"Generated: {generated}  |  Database: {os.environ.get('DB_NAME') or os.environ.get('DB_DSN','')}",
+        f"Filter: {args.objects or 'all objects'}",
+        "",
+        "## Columns", "", table(sections['columns'], HEADERS['columns']),
+        "## Indexes", "", table(sections['indexes'], [f"col{i+1}" for i in range(len(sections['indexes'][0]))] if sections['indexes'] else ["-"]),
+        "## Foreign keys", "", table(sections['foreign_keys'], HEADERS['foreign_keys']),
+        "## Approximate row counts", "",
+        "_Depends on current statistics (ANALYZE on PostgreSQL, DBMS_STATS on Oracle)._", "",
+        table(sections['row_counts'], [f"col{i+1}" for i in range(len(sections['row_counts'][0]))] if sections['row_counts'] else ["-"]),
+    ]
 
--- Approximate row counts (needs current statistics)
-SELECT table_name, num_rows AS approx_rows, last_analyzed
-FROM   user_tables
-ORDER  BY num_rows DESC;
-```
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(body))
+    print(f"Wrote {out_path} ({len(sections['columns'])} column rows)")
+
+
+if __name__ == "__main__":
+    main()
