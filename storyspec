@@ -5,7 +5,7 @@ description: >-
   design document outlining the technical approach, architecture, data flow, and
   implementation details.
 model: Claude Sonnet 4.6 (copilot)
-tools: [edit/createFile, read/readFile, search/listDirectory, search/fileSearch, search/textSearch]
+tools: [edit/createFile, read/readFile, search/listDirectory, search/fileSearch, search/textSearch, runCommands]
 handoffs:
   - label: Apply the Design
     prompt: >-
@@ -84,19 +84,24 @@ it. A file that "might" be relevant is not a reason to open it.
 ## Phase 2b — Data access
 
 If the story touches persistence — reads, writes, reporting, schema — read
-`.github/instructions/db-design.md` and follow it.
+[db-design](../instructions/db-design.md) and follow it.
 
 Do not choose between an ORM query, raw SQL, a view, or a stored routine without it. Do not assume a
 table, view, or column exists because the story named it: the DbContext covers only what the
 application already maps, and stories frequently reference objects that are in the database but not
-in the model. You have no live database access — if those objects are not in the DbContext, the
-migrations, or a schema snapshot committed to the repository, stop and ask the user for the schema
-before writing the design.
+in the model. You have no direct database connection. If those objects are not in the DbContext, the migrations,
+or a schema snapshot committed to the repository, refresh the snapshot by running
+`python scripts/dump_schema.py` as described in that file. If you have no terminal tool, or the
+script cannot run, stop and ask the user for the schema before writing the design.
 
 ## Phase 3 — Produce the design document
 
 Write `/designs/{user_story_id}/design.md` with these sections:
 
+0. **Status** — `READY` or `BLOCKED`. Use `BLOCKED` if any Open Question would change which files
+   are touched, what the feature does, or which schema objects are involved. A blocked document is a
+   request for information, not an implementation plan: the implementation agent must stop and
+   surface the Open Questions rather than act on it.
 1. **Story summary** — the requirement in your own words, plus the acceptance criteria.
 2. **Scope declaration** — the primary and secondary scopes from Phase 2, Step 1.
 3. **Current behaviour** — what exists today in the touched area, with file paths and symbol names.
@@ -105,14 +110,18 @@ Write `/designs/{user_story_id}/design.md` with these sections:
    change (new / modify / delete).
 6. **Contracts affected** — API signatures, DTOs, events, config keys. Flag any breaking change.
 7. **Data access** — only if Phase 2b applies; use the section structure defined in
-   `.github/instructions/db-design.md`.
+   [db-design](../instructions/db-design.md).
 8. **Data flow** — the path of a request or event through the changed components.
 9. **Implementation steps** — an ordered list a coding agent can follow.
 10. **Test plan** — unit and integration tests to add or update, with the cases they cover.
 11. **Out of scope** — what this story explicitly does not change.
 12. **Assumptions** — low-risk details only.
-13. **Open questions** — anything unresolved. If this list contains an item that would change which
-    files are touched or what the feature does, do not write the document; ask the user instead.
+13. **Open questions** — anything unresolved.
+
+**When something critical is unresolved:** if you are running interactively, stop and ask the user
+before writing the document. If you are running unattended and cannot ask, write the document with
+`Status: BLOCKED` and the precise questions under Open Questions. Never fill a gap with an invented
+file, symbol, table, or column.
 
 Before writing the file, verify: every file path you cite was confirmed to exist, every symbol was
 located via search, and no schema detail was invented.
