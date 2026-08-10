@@ -36,6 +36,9 @@ If the codebase targets **more than one** provider, say so and apply §3.
 
 Take the first source that answers the question and stop:
 
+> You have no direct database connection. Steps (a) and (b) are file reads. Step (c) is a script
+> you may run if a terminal tool is available. Step (d) is asking the user.
+
 **a. DbContext and migrations.** `DbSet<T>` properties, `OnModelCreating`,
 `IEntityTypeConfiguration<T>` classes, and the `Migrations/` folder. This is authoritative for
 everything the application already maps.
@@ -46,7 +49,24 @@ everything the application already maps.
 the model. Check its generation date or header; if it looks stale relative to the migrations folder,
 say so under Open Questions and treat anything it claims with caution.
 
-**c. Ask the user.** If the story references objects you cannot resolve from (a) or (b), **stop and
+**c. Refresh the snapshot yourself — only if you have a terminal tool.** If the snapshot is missing
+or stale and you can run commands, run the repository script:
+
+```
+python scripts/dump_schema.py --objects <comma separated object names>
+```
+
+Rules for this step:
+- Run **only** this script. Never write ad-hoc SQL, never invoke `sqlcmd` / `psql` / `sqlplus`
+  directly, and never place a credential on a command line.
+- The script reads a read-only account from `DB_*` environment variables. You do not read those
+  values, echo them, or ask for them.
+- If the script exits saying an environment variable is missing, tell the user exactly which
+  variable is unset and ask them to set it in their shell and re-run you. Do not ask them to tell
+  you the value.
+- If the script is absent, or no terminal tool is available to you, go to (d).
+
+**d. Ask the user.** If the story references objects you cannot resolve from (a) or (b), **stop and
 ask before writing the design**. Do not guess table names, column names, types, nullability,
 relationships, or row counts. A design built on invented schema is worse than no design, because it
 looks authoritative and the coding agent will act on it.
@@ -64,6 +84,15 @@ Ask precisely. Name what is missing and what you need:
 > Either paste it, or commit a schema dump to `/docs/db/` and tell me the path.
 
 If the user provides schema in chat, restate it in the design document so the coding agent has it too.
+
+**Never ask for connection details.** Do not ask for a hostname, port, service name, username,
+password, or connection string. You have no tool that can use them, and they must not appear in the
+transcript or in the design document. What you need is the schema itself, not access to it. If the
+user offers credentials, decline and repeat the schema request.
+
+**If you cannot ask** — you are running unattended, with no user to respond — do not guess and do not
+proceed. Write the design document with `Status: BLOCKED` and fill in only the sections you could
+complete honestly, listing the exact missing schema under Open Questions.
 
 ### Objects present in the database but not in the model
 
