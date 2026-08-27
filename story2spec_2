@@ -31,6 +31,7 @@ Core Rules
 • If a critical ambiguity is found that cannot be resolved from the codebase or work item (e.g. it would materially change which files are touched or what the feature does), stop and ask the user to clarify BEFORE producing the design document.
 • Only mark something as an assumption when it is a low-risk detail that will not derail the implementation (e.g. exact label wording, minor UI details).
 • Your design must be specific enough that a coding agent can implement it without making undirected guesses.
+• Each phase ends with a checkpoint. Do not declare a phase complete or move to the next one until every check in that phase's checkpoint passes. If a check fails, redo the step that produced the failure before continuing.
 • Do NOT create or write the design specification until every phase below is complete. If the story touches persistence, the data access approach must be decided in Phase 2b BEFORE any part of the design document is written. Writing the document first and investigating afterwards is a failure.
 
 Required Workflow
@@ -40,6 +41,11 @@ Phase 1 — Analyse the Story
 • Analyse the user story and acceptance criteria carefully.
 • Fetch any related work items linked to the story; their Descriptions and Acceptance Criteria often name exact file/key names that scope the search. Do not fetch task-type work items — they contain no Acceptance Criteria.
 • Fetch any comments as they sometimes contain clarifications or additional requirements.
+
+Phase 1 checkpoint — state "Phase 1 complete" only after verifying:
+• Every acceptance criterion has been written out explicitly, numbered, and carried forward. If the story has no acceptance criteria, stop and ask the user.
+• Each AC is unambiguous about what the feature does and what would prove it done.
+If any check fails, redo Phase 1 for the failing item before continuing. Do not proceed on a partial understanding.
 
 Phase 2 — Investigate the Codebase
 
@@ -63,6 +69,12 @@ Directory-listing gate. Seeing a filename in a directory listing is NOT a reason
 
 No scope creep. Thinking a file "might" be relevant is NOT a reason to open it. Having already confirmed the pattern you needed is NOT a reason to open a second file of the same type.
 
+Phase 2 checkpoint — state "Phase 2 complete" only after verifying:
+• Every acceptance criterion maps to at least one file or symbol you actually located. Name the AC and the file for each. An AC with no corresponding code location means the investigation is incomplete, not that the AC is out of scope.
+• Every file you intend to cite in the design was confirmed to exist via a search call, not assumed.
+• No declared scope was left uninvestigated.
+If any check fails, return to Phase 2 and search for the missing item. Do not proceed with unmapped acceptance criteria.
+
 Phase 2b — Data Access
 
 Applies only when the story touches persistence (reads, writes, reporting, schema). Complete this phase before Phase 3 — the design document cannot be written until the approach below is chosen.
@@ -74,8 +86,23 @@ Applies only when the story touches persistence (reads, writes, reporting, schem
 • Decide the approach — DbContext/ORM, inline raw SQL, database view, or function/stored procedure — by completing the decision procedure in `db-design.md`. You must hold this decision, the alternatives rejected, and the schema evidence behind it before moving to Phase 3.
 • If the schema cannot be resolved, stop and ask the user — this is a critical ambiguity under the Core Rules. Do not write a design document built on unresolved schema.
 
+Phase 2b checkpoint — state "Phase 2b complete" only after verifying:
+• Every schema object the design will reference was resolved from the DbContext, the bundle under `docs/db/`, or the user. Name the source for each. Nothing was assumed to exist.
+• The chosen approach came from completing the decision procedure in `db-design.md`, not from a default preference.
+• Any acceptance criterion stating a performance or volume constraint has row counts and index evidence behind the chosen approach, or is explicitly marked unvalidated.
+• `routines/` was checked before proposing any new function or stored procedure.
+If any check fails, redo the failing step — re-run the dump script if an object is unresolved, or re-run the decision procedure if the evidence is missing.
+
 Phase 3 — Produce the Design Specification
 
 • Only now create the design specification. It must be written against the approach decided in Phase 2b, not against an assumed one.
 • Where the story touches persistence, the design must state the chosen data access approach, the alternatives rejected and why, the schema objects involved and how each was resolved, and the evidence (row counts, indexes) behind the choice.
 • The query shape, entity mapping, migration impact and test plan in the design must all follow from that approach.
+
+Phase 3 checkpoint — state "Phase 3 complete" only after verifying, against the written document:
+• Each acceptance criterion is addressed by a named change in the design. List AC number to design section. An AC with no corresponding change means the design is incomplete.
+• Every file path cited exists and was confirmed in Phase 2.
+• Every schema object cited was resolved in Phase 2b and matches the source it came from — table and column names spelled as the source has them.
+• The stated data access approach is the one Phase 2b produced, and the query shape shown is consistent with it.
+• Nothing in the document is an invented detail presented as fact. Anything uncertain is recorded as an assumption or an open question.
+If any check fails, correct the design specification and run this checkpoint again. Do not present the design as final until every check passes. Report the AC-to-change mapping to the user when you finish.
