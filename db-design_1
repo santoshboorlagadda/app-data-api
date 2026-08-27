@@ -1,0 +1,277 @@
+# Data Access Design Rules
+
+Applies whenever a user story touches persistence — reads, writes, reporting, or schema.
+Supported providers: **Oracle**, **SQL Server**, **PostgreSQL**.
+
+You are a design agent. These rules tell you how to decide and document a data-access approach.
+You must not implement it.
+
+**You have no live database access.** There is no database tool available to you. You cannot connect,
+query, or introspect. Everything you know about the schema must come from a file in the repository or
+from the user. Never read credentials from `appsettings*.json` and never attempt a connection.
+
+---
+
+## 1. Declare the provider first
+
+Determine the provider from the repository, in this order:
+
+1. EF Core provider package in the `.csproj`:
+   - `Microsoft.EntityFrameworkCore.SqlServer` → SQL Server
+   - `Npgsql.EntityFrameworkCore.PostgreSQL` → PostgreSQL
+   - `Oracle.EntityFrameworkCore` → Oracle
+2. The `UseSqlServer` / `UseNpgsql` / `UseOracle` call in DI registration.
+3. Connection-string shape in `appsettings*.json` — read it **only** to identify provider, server and
+   database name. Never read, echo, or copy a password, key, or secret. Never put a connection string
+   in the design document.
+
+Record the provider and, if stated anywhere in the repo, the server version. Several rules below
+change with the version.
+
+If the codebase targets **more than one** provider, say so and apply §3.
+
+---
+
+## 2. Resolving the schema
+
+Take the first source that answers the question and stop:
+
+> You have no direct database connection. Steps (a) and (b) are file reads. Step (c) is a script
+> you may run if a terminal tool is available. Step (d) is asking the user.
+
+**a. DbContext and migrations.** `DbSet<T>` properties, `OnModelCreating`,
+`IEntityTypeConfiguration<T>` classes, and the `Migrations/` folder. This is authoritative for
+everything the application already maps.
+
+**b. OKF schema bundle committed to the repository.** Look under `docs/db/<provider>/` for an
+Open Knowledge Format bundle — a directory of markdown concept files, one per table or view, each
+with YAML frontmatter (`type`, `title`, `description`, `tags`, `timestamp`) and a body containing
+columns, indexes and keys.
+
+The layout is `docs/db/<provider>/<schema>/{tables,views,routines}/<object>.md`. Objects are
+scoped by schema, so `sales.orders` and `staging.orders` are distinct concepts — always confirm
+which schema a story means before designing against it.
+
+Navigate it; do not read it whole. The same reading discipline applies as to source code:
+
+1. Start at `docs/db/<provider>/index.md` to see which schemas exist.
+2. Follow to `<schema>/index.md`, then `tables/index.md`, `views/index.md` or `routines/index.md`.
+   These are listings, not reading queues.
+3. Open only the concept files for objects the story actually touches. A 200-object bundle should
+   normally cost you three to six file reads.
+4. Foreign keys are markdown links to the referenced concept. Follow a link only when the story
+   needs that object.
+
+**Check `routines/` before proposing any new function or stored procedure.** A routine that already
+does the job — or most of it — changes the design: call or extend it rather than adding a duplicate.
+If an existing routine is close but not exact, say so explicitly and recommend extending it, or
+justify why a new one is needed. Proposing a new routine without having looked at `routines/` is an
+error.
+
+Check the `timestamp` in the frontmatter. If it predates the newest migration in `Migrations/`, the
+bundle may be stale — say so under Open Questions and treat its row counts as unvalidated.
+
+This is the only source for objects that exist in the database but are not in the model.
+
+**c. Refresh the snapshot yourself — only if you have a terminal tool.** If the snapshot is missing
+or stale and you can run commands, run the repository script:
+
+```
+python scripts/dump_schema.py --list                                    # confirm what it detects
+python scripts/dump_schema.py --objects <comma separated object names>  # then dump
+```
+
+The script discovers the connection string in `appsettings*.json`, detects whether the application
+runs on PostgreSQL, SQL Server or Oracle, and writes an OKF bundle to `docs/db/<provider>/`. It needs no
+per-application configuration. If several connection strings exist it will refuse to guess — re-run
+with `--name <ConnectionName>`.
+
+Rules for this step:
+- Run **only** this script. Never write ad-hoc SQL, never invoke `sqlcmd` / `psql` / `sqlplus`
+  directly, and never place a credential on a command line.
+- **Do not open `appsettings*.json` yourself to obtain credentials.** The script parses it; you do
+  not. Anything you read enters the transcript and may be copied into the design document. You may
+  read a connection string only to note the provider, host and database name — never a password —
+  and none of it goes in the document.
+- If a password is a `${VAR}` placeholder or absent, the script says so. Tell the user which
+  environment variable to set. Do not ask them to tell you the value.
+- If the script exits reporting a missing driver, tell the user the exact `pip install` line it
+  printed.
+- If the script is absent, or no terminal tool is available to you, go to (d).
+
+**d. Ask the user.** If the story references objects you cannot resolve from (a) or (b), **stop and
+ask before writing the design**. Do not guess table names, column names, types, nullability,
+relationships, or row counts. A design built on invented schema is worse than no design, because it
+looks authoritative and the coding agent will act on it.
+
+Ask precisely. Name what is missing and what you need:
+
+> I can't resolve `RPT_TRADE_SUMMARY` from the DbContext, the migrations, or a schema snapshot in the
+> repo. To design this correctly I need, for each object the story touches:
+> - DDL or a column list (name, type, nullable)
+> - primary key and foreign keys
+> - existing indexes
+> - approximate row count
+> - whether it is a table or a view, and which team owns it
+>
+> Either paste it, or commit a schema dump to `/docs/db/` and tell me the path.
+
+If the user provides schema in chat, restate it in the design document so the coding agent has it too.
+
+**Never ask for connection details.** Do not ask for a hostname, port, service name, username,
+password, or connection string. You have no tool that can use them, and they must not appear in the
+transcript or in the design document. What you need is the schema itself, not access to it. If the
+user offers credentials, decline and repeat the schema request.
+
+**If you cannot ask** — you are running unattended, with no user to respond — do not guess and do not
+proceed. Write the design document with `Status: BLOCKED` and fill in only the sections you could
+complete honestly, listing the exact missing schema under Open Questions.
+
+### Objects present in the database but not in the model
+
+When the story needs an object that exists in the database but not in the DbContext, the design must
+state which of these applies and why:
+
+- Add a new entity plus configuration (a table that will be written to).
+- Map as a **keyless entity** (`HasNoKey`) — read-only views and reporting projections.
+- Do not map at all; access through raw SQL projected into a DTO.
+- A migration is required (the object does not exist yet, or must change).
+
+Also state who owns the object. If another team owns it, do not propose schema changes to it — raise
+it as an Open Question.
+
+---
+
+## 3. Multi-provider check
+
+**Does one codebase have to run against more than one of Oracle / SQL Server / PostgreSQL?**
+
+- **Yes** → EF Core LINQ is the default and the bar for leaving it is high. Every raw SQL statement or
+  database routine must be written and maintained once per provider, with a migration path each. If
+  you still recommend it, list each provider variant as a separate deliverable and justify the
+  multiplied cost.
+- **No** → use §4 on its merits.
+
+---
+
+## 4. Choosing the approach
+
+Work through these steps in order. Do not skip to the table.
+
+**Step 1 — Hard constraints.** If the codebase is multi-provider (§3), or the object is owned by
+another team, or the story explicitly names an approach, that decides it. Record the constraint and
+stop.
+
+**Step 2 — Classify the operation.** Write down, from the story and the resolved schema:
+- does an existing routine in `routines/` already cover this, wholly or partly?
+- read / write / both
+- number of tables joined
+- aggregation, window functions, CTEs, or recursion needed?
+- single statement, or multiple statements that must succeed or fail together?
+- called per user request (hot path) or from a batch/report?
+- used only by this application, or also by jobs and other systems?
+- expected rows scanned and rows returned
+
+**Step 3 — Apply the table below** to that classification.
+
+**Step 4 — Evidence gate.** If the answer from Step 3 is anything other than LINQ, you must be able
+to cite the row counts and indexes from §5. If you cannot, you do not have grounds to leave LINQ:
+recommend LINQ, and list the alternative under "revisit if" with the specific measurement that would
+change the answer. Do not recommend a stored routine on unvalidated grounds.
+
+**Step 5 — Record the rejected alternatives** and the specific reason each was rejected.
+
+
+Default order of preference: **LINQ → raw SQL → view → database routine.** Move down only when the
+evidence in §5 supports it.
+
+| Approach | Use when | Do not use when |
+|---|---|---|
+| **EF Core LINQ** | Single aggregate or a few related entities; up to ~3 joins; CRUD; filtering, sorting, paging; results map to entities or a DTO projection | The generated SQL cannot be made to use the right index; large set-based work |
+| **Raw SQL** (`FromSql`, `SqlQuery<T>`, Dapper) | 4+ joins; CTEs or window functions; provider-specific hints; a shape EF cannot express; bulk work not covered by `ExecuteUpdate` / `ExecuteDelete` | It is only being used to avoid the LINQ equivalent |
+| **View** | A stable read shape reused by several features; complex joins that belong close to the data | The shape serves one screen and will not be reused |
+| **Stored procedure / package / function** | An existing routine in `routines/` already does the job; multi-statement transactional work that must run next to the data; logic genuinely shared with other applications or jobs; plan stability is a stated requirement | Business logic that belongs in the application; a single SELECT; a multi-provider codebase (§3); a duplicate of a routine that already exists |
+
+Whenever a database routine or view is recommended, the design must state: where the DDL lives in
+source control, how it is deployed (migration or script pipeline), how it is versioned, how it will
+be tested, and who owns it afterwards.
+
+### Mandatory rules for read paths
+
+- `AsNoTracking()` — or `AsNoTrackingWithIdentityResolution()` where the graph repeats.
+- Project to a DTO. Never return entities from a query that needs a subset of columns.
+- Keyset paging where the story implies deep paging or an unbounded result set. Offset paging only
+  for small bounded sets.
+- No client-side evaluation of a filter or aggregate over a large table. If EF cannot translate it,
+  that is a reason to move down the table — not to call `.ToList()` early.
+
+Example of the expected read shape:
+
+```csharp
+var rows = await db.Trades
+    .AsNoTracking()
+    .Where(t => t.BookId == bookId && t.TradeDate >= from)
+    .OrderBy(t => t.TradeDate).ThenBy(t => t.TradeId)
+    .Select(t => new TradeSummaryDto(t.TradeId, t.TradeDate, t.Notional, t.Counterparty.Name))
+    .Take(pageSize)
+    .ToListAsync(ct);
+```
+
+---
+
+## 5. Evidence
+
+"For performance" is not a justification. Any recommendation that leaves plain LINQ must cite what
+you actually found:
+
+- Tables involved and their approximate row counts.
+- Existing indexes on the join and filter columns, and whether the proposed query can use them.
+- Expected result-set size and the selectivity of the filters.
+- Whether this is a hot path (per request) or a background/reporting path.
+
+Since you cannot query the database, this evidence can only come from the schema snapshot or the
+user. **If you do not have it, say so and mark the performance recommendation as unvalidated.** Do not
+present a guess as an analysis, and do not recommend a stored routine on unvalidated grounds — ask
+for the row counts and indexes instead.
+
+Any new index the design proposes must be listed with its columns, include columns, and the query it
+serves.
+
+---
+
+## 6. Provider differences
+
+| | **SQL Server** | **PostgreSQL** | **Oracle** |
+|---|---|---|---|
+| Routine form | Stored procedure | Function, or procedure (11+) | Procedure/function, normally inside a package |
+| Returning a result set to EF | Straightforward via `FromSql` onto a keyless type | Function returning `TABLE(...)` or `SETOF` — maps cleanly | `SYS_REFCURSOR`, awkward from EF Core — **prefer a view or a pipelined table function** |
+| Paging | `OFFSET … FETCH NEXT` (2012+) | `LIMIT … OFFSET` | `OFFSET … FETCH` (12c+), `ROWNUM` below that |
+| Upsert | `MERGE` | `INSERT … ON CONFLICT` | `MERGE` |
+| Bulk update/delete | `ExecuteUpdate` / `ExecuteDelete` (EF 7+) | same | same |
+| Identifier casing | Case-insensitive by default | Unquoted folds to **lower**; quoted is case-sensitive | Unquoted folds to **UPPER**; quoted is case-sensitive |
+| Boolean | `bit` | native `boolean` | No native boolean before 23c → `NUMBER(1)`; state the mapping |
+| GUID | `uniqueidentifier` | `uuid` | `RAW(16)` |
+| Date/time | `datetime2`, `datetimeoffset` | prefer `timestamptz` | `DATE` **includes a time component**; `TIMESTAMP WITH TIME ZONE` for offsets |
+| Key generation | `IDENTITY` | `GENERATED … AS IDENTITY` | `IDENTITY` (12c+), or sequence + trigger |
+| Schema naming | `dbo` or a named schema | `public` or a named schema | Schema is the user; qualify accordingly |
+
+If the design touches any of these, name the concrete type and mapping in the spec rather than
+leaving it to the implementation agent.
+
+---
+
+## 7. Required section in the design document
+
+Every design that touches persistence must contain a **Data Access** section with:
+
+1. Provider and version; multi-provider status (§3).
+2. Schema objects involved — tables, views, columns, keys, indexes — and how each was resolved
+   (DbContext / OKF bundle / supplied by user). Link to the concept file for each object used,
+   e.g. `[trades](../../docs/db/postgres/tables/trades.md)`.
+3. Gaps: objects in the database but not in the model, and the decision for each (§2).
+4. Chosen approach and the decision-table row that justifies it.
+5. Alternatives considered and why they were rejected.
+6. Evidence (§5), or an explicit statement that it is unvalidated.
+7. Migration impact: new migration, script, or routine deployment.
+8. Concurrency and transaction boundaries.
+9. Test plan: what an in-memory or SQLite test covers, and what needs a real database.
