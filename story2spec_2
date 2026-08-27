@@ -31,6 +31,7 @@ Core Rules
 • If a critical ambiguity is found that cannot be resolved from the codebase or work item (e.g. it would materially change which files are touched or what the feature does), stop and ask the user to clarify BEFORE producing the design document.
 • Only mark something as an assumption when it is a low-risk detail that will not derail the implementation (e.g. exact label wording, minor UI details).
 • Your design must be specific enough that a coding agent can implement it without making undirected guesses.
+• Do NOT create or write the design specification until every phase below is complete. If the story touches persistence, the data access approach must be decided in Phase 2b BEFORE any part of the design document is written. Writing the document first and investigating afterwards is a failure.
 
 Required Workflow
 
@@ -62,13 +63,19 @@ Directory-listing gate. Seeing a filename in a directory listing is NOT a reason
 
 No scope creep. Thinking a file "might" be relevant is NOT a reason to open it. Having already confirmed the pattern you needed is NOT a reason to open a second file of the same type.
 
-Phase 3 — Data Access
+Phase 2b — Data Access
 
-Applies only when the story touches persistence (reads, writes, reporting, schema).
+Applies only when the story touches persistence (reads, writes, reporting, schema). Complete this phase before Phase 3 — the design document cannot be written until the approach below is chosen.
 
+• If `docs/db/` does not exist or does not contain the objects the story needs, run `python scripts/dump_schema_test.py` to generate it. Do this yourself; do not ask the user to run it. This is the first action of this phase, not a later correction.
 • Read `.github/instructions/db-design.md` and follow it. It defines how database schema is resolved and how the data access approach is chosen.
-• If `docs/db/` does not exist or does not contain the objects the story needs, run `python scripts/dump_schema_test.py` to generate it before proceeding. Do this yourself; do not ask the user to run it.
 • Do not assume a table, view, column or function exists because the story named it. The DbContext covers only what the application already maps; stories frequently reference objects that exist in the database but not in the model.
 • The reading discipline from Phase 2 applies equally to the schema bundle under `docs/db/`. Navigate by index and open only the concept files for objects the story touches. A folder index is NOT a reading queue.
-• Do not choose between the DbContext/ORM approach, an inline raw SQL query, or a database function or stored procedure without completing the decision procedure in that file. Record the chosen approach, the alternatives rejected, and the schema evidence behind the choice in the design specification.
-• If the schema cannot be resolved, stop and ask the user — this is a critical ambiguity under the Core Rules.
+• Decide the approach — DbContext/ORM, inline raw SQL, database view, or function/stored procedure — by completing the decision procedure in `db-design.md`. You must hold this decision, the alternatives rejected, and the schema evidence behind it before moving to Phase 3.
+• If the schema cannot be resolved, stop and ask the user — this is a critical ambiguity under the Core Rules. Do not write a design document built on unresolved schema.
+
+Phase 3 — Produce the Design Specification
+
+• Only now create the design specification. It must be written against the approach decided in Phase 2b, not against an assumed one.
+• Where the story touches persistence, the design must state the chosen data access approach, the alternatives rejected and why, the schema objects involved and how each was resolved, and the evidence (row counts, indexes) behind the choice.
+• The query shape, entity mapping, migration impact and test plan in the design must all follow from that approach.
