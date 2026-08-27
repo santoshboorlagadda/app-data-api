@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""
+Quick test version — PostgreSQL only, hardcoded connection.
+
+Fill in the CONFIG block below and run:
+
+    pip install "psycopg[binary]"
+    python scripts/dump_schema_test.py
+
+Writes an OKF bundle to docs/db/postgres/.
+
+THROWAWAY. Do not commit this file with a real password in it — add it to
+.gitignore now, before you paste anything in. Switch to dump_schema.py
+(which reads appsettings.json and env vars) once the test passes.
+"""
+import datetime as dt
+import os
+import re
+import sys
+
+# ==========================================================================
+# CONFIG — fill these in
+# ==========================================================================
+HOST     = "REPLACE_ME_HOST"          # e.g. pg-dev.internal
+PORT     = "5432"
+DATABASE = "REPLACE_ME_DATABASE"      # e.g. thanos
+USER     = "REPLACE_ME_USER"          # your read-only user
+PASSWORD = "REPLACE_ME_PASSWORD"
+
+SCHEMAS  = ["public"]                 # e.g. ["sales", "staging"]
+OBJECTS  = None                       # None = everything, or ["trades", "books", "vw_position"]
+OUT_DIR  = os.path.join("docs", "db", "postgres")
+# ==========================================================================
+
+
+def schema_filter(column):
+    names = ", ".join(f"'{s}'" for s in SCHEMAS)
+    return f"{column} IN ({names})"
+
+
+QUERIES = {
+    "columns": f"""
+        SELECT c.table_schema, c.table_name, t.table_type, c.column_name, c.data_type,
+               c.character_maximum_length, c.numeric_precision, c.numeric_scale, c.is_nullable
+        FROM information_schema.columns c
+        JOIN information_schema.tables t
+          ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+        WHERE {schema_filter('c.table_schema')}
+        ORDER BY c.table_schema, c.table_name, c.ordinal_position""",
+
+    "indexes": f"""
+        SELECT schemaname, tablename, indexname, indexdef
+        FROM pg_indexes
+        WHERE {schema_filter('schemaname')}
+        ORDER BY schemaname, tablename""",
+
+    "keys": f"""
+        SELECT tc.table_schema, tc.table_name, tc.constraint_type, tc.constraint_name,
+               kcu.column_name, ccu.table_name
+        FROM information_schema.table_constraints tc
+        LEFT JOIN information_schema.key_column_usage kcu
+               ON kcu.constraint_name = tc.constraint_name
+        LEFT JOIN information_schema.constraint_column_usage ccu
+               ON ccu.constraint_name = tc.constraint_name AND tc.constraint_type = 'FOREIGN KEY'
+        WHERE {schema_filter('tc.table_schema')}
+          AND tc.constraint_type IN ('PRIMARY KEY','FOREIGN KEY','UNIQUE')""",
+
+    # primary source for row counts — needs pg_read_all_stats
+    "row_counts": f"""
+        SELECT schemaname, relname, n_live_tup, last_analyze
+        FROM pg_stat_user_tables
+        WHERE {schema_filter('schemaname')}
+        ORDER BY n_live_tup DESC""",
+
+    # fallback — readable by any user, planner estimate
+    "row_counts_fallback": f"""
+        SELECT n.nspname, c.relname, c.reltuples::bigint, NULL
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'r' AND {schema_filter('n.nspname')}
+        ORDER BY c.reltuples DESC""",
+
+    "routines": f"""
+        SELECT n.nspname, p.proname,
+               CASE p.prokind WHEN 'f' THEN 'FUNCTION' WHEN 'p' THEN 'PROCEDURE'
+                              WHEN 'a' THEN 'AGGREGATE' ELSE 'OTHER' END,
+               pg_get_function_arguments(p.oid),
+               pg_get_function_result(p.oid),
+               obj_description(p.oid, 'pg_proc')
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE {schema_filter('n.nspname')}
+        ORDER BY n.nspname, p.proname""",
+}
+
+
+def slug(name):
+    return re.sub(r"[^a-z0-9_]+", "_", str(name).lower()).strip("_")
+
+
+def yaml_escape(value):
+    return '"' + str(value or "").replace('"', "'").replace("\n", " ") + '"'
+
+
+def frontmatter(concept_type, title, description, tags, timestamp):
+    return "\n".join([
+        "---",
+        f"type: {yaml_escape(concept_type)}",
+        f"title: {yaml_escape(title)}",
+        f"description: {yaml_escape(description)}",
+        "tags: [" + ", ".join(tags) + "]",
+        f"timestamp: {timestamp}",
+        "---",
+    ]) + "\n"
+
+
+def md_table(rows, headers):
+    if not rows:
+        return "_none_\n"
+    out = ["| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
+    for r in rows:
+        out.append("| " + " | ".join("" if c is None else str(c).replace("|", "\\|")
+                                     for c in r) + " |")
+    return "\n".join(out) + "\n"
+
+
+def keep(row):
+    if not OBJECTS:
+        return True
+    wanted = {o.upper() for o in OBJECTS}
+    return any(str(c).upper() in wanted for c in row[:3] if c is not None)
+
+
+def main():
+    if "REPLACE_ME" in HOST + DATABASE + USER + PASSWORD:
+        sys.exit("Fill in the CONFIG block at the top of this file first.")
+
+    try:
+        import psycopg
+    except ImportError:
+        sys.exit('Driver missing. Run:  pip install "psycopg[binary]"')
+
+    conn = psycopg.connect(host=HOST, port=PORT, dbname=DATABASE,
+                           user=USER, password=PASSWORD)
+    print(f"Connected: {USER}@{HOST}/{DATABASE}  schemas={SCHEMAS}")
+
+    def run(sql):
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            return [tuple(r) for r in cur.fetchall()]
+
+    data = {}
+    for key in ["columns", "indexes", "keys", "routines", "row_counts"]:
+        try:
+            data[key] = [r for r in run(QUERIES[key]) if keep(r)]
+            print(f"  {key}: {len(data[key])} rows")
+        except Exception as exc:                        # noqa: BLE001
+            data[key] = []
+            print(f"  {key}: FAILED ({type(exc).__name__}: {exc})", file=sys.stderr)
+
+    # if stats are unavailable or all zero, fall back to the planner estimate
+    if not data["row_counts"] or all((r[2] or 0) == 0 for r in data["row_counts"]):
+        try:
+            data["row_counts"] = [r for r in run(QUERIES["row_counts_fallback"]) if keep(r)]
+            print(f"  row_counts: using pg_class.reltuples fallback "
+                  f"({len(data['row_counts'])} rows)")
+        except Exception as exc:                        # noqa: BLE001
+            print(f"  row_counts fallback FAILED ({type(exc).__name__})", file=sys.stderr)
+
+    conn.close()
+    write_bundle(data)
+
+
+def write_bundle(data):
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    idx_by, key_by, count_by = {}, {}, {}
+    for r in data["indexes"]:
+        idx_by.setdefault((r[0], r[1]), []).append(r)
+    for r in data["keys"]:
+        key_by.setdefault((r[0], r[1]), []).append(r)
+    for r in data["row_counts"]:
+        count_by[(r[0], r[1])] = (r[2], r[3])
+
+    objects = {}
+    for r in data["columns"]:
+        objects.setdefault((r[0], r[1], r[2]), []).append(r)
+    known = {(s, n) for s, n, _ in objects}
+    written = {}
+
+    def record(schema, folder, name):
+        written.setdefault(schema, {"tables": [], "views": [], "routines": []})[folder].append(name)
+
+    for (schema, name, kind), cols in sorted(objects.items()):
+        is_view = "VIEW" in str(kind).upper()
+        folder = "views" if is_view else "tables"
+        approx, analyzed = count_by.get((schema, name), (None, None))
+
+        body = [frontmatter(
+            f"PostgreSQL {'View' if is_view else 'Table'}", f"{schema}.{name}",
+            f"{'View' if is_view else 'Table'} {schema}.{name} in {DATABASE}.",
+            ["postgres", slug(schema), "schema"], timestamp)]
+        body.append(f"# {schema}.{name}\n")
+        if approx is not None:
+            line = f"Approximate rows: **{approx}**"
+            line += f" (statistics last updated {analyzed})" if analyzed \
+                else " (planner estimate — statistics unavailable)"
+            body.append(line + "\n")
+
+        body.append("## Columns\n")
+        body.append(md_table([(c[3], c[4], c[5], c[6], c[7], c[8]) for c in cols],
+                             ["column", "type", "length", "precision", "scale", "nullable"]))
+
+        body.append("\n## Indexes\n")
+        rows = idx_by.get((schema, name), [])
+        body.append(md_table([(r[2], r[3]) for r in rows], ["index", "definition"]))
+
+        body.append("\n## Keys and joins\n")
+        krows = key_by.get((schema, name), [])
+        if krows:
+            lines = ["| type | constraint | column | references |", "|---|---|---|---|"]
+            for k in krows:
+                ref = k[5]
+                if ref:
+                    target = (schema, ref) if (schema, ref) in known \
+                        else next((o for o in known if o[1] == ref), None)
+                    if target:
+                        rel = f"{slug(ref)}.md" if target[0] == schema \
+                            else f"../../{slug(target[0])}/tables/{slug(ref)}.md"
+                        ref = f"[{ref}]({rel})"
+                lines.append(f"| {k[2]} | {k[3]} | {k[4] or ''} | {ref or ''} |")
+            body.append("\n".join(lines) + "\n")
+        else:
+            body.append("_none_\n")
+
+        path = os.path.join(OUT_DIR, slug(schema), folder)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, f"{slug(name)}.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(body))
+        record(schema, folder, name)
+
+    for r in sorted(data["routines"]):
+        schema, name, kind, args, returns, comment = (list(r) + [None] * 6)[:6]
+        body = [frontmatter(
+            f"PostgreSQL {str(kind).title()}", f"{schema}.{name}",
+            (comment or f"{str(kind).title()} {schema}.{name}.").replace("\n", " "),
+            ["postgres", slug(schema), "routine"], timestamp)]
+        body.append(f"# {schema}.{name}\n")
+        body.append(f"- Kind: `{kind}`")
+        body.append(f"- Arguments: `{args or 'none'}`")
+        if returns:
+            body.append(f"- Returns: `{returns}`")
+        body.append("\n> An existing routine. Prefer calling this over writing a new one that "
+                    "duplicates it.\n")
+        path = os.path.join(OUT_DIR, slug(schema), "routines")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, f"{slug(name)}.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(body))
+        record(schema, "routines", name)
+
+    for schema, folders in written.items():
+        for folder, label in [("tables", "Tables"), ("views", "Views"), ("routines", "Routines")]:
+            names = sorted(set(folders[folder]))
+            if not names:
+                continue
+            idx = [frontmatter("Index", f"{schema} {label}", f"{label} in schema {schema}.",
+                               ["postgres", slug(schema), "index"], timestamp)]
+            idx.append(f"# {schema} — {label}\n")
+            idx += [f"- [{n}]({slug(n)}.md)" for n in names]
+            with open(os.path.join(OUT_DIR, slug(schema), folder, "index.md"),
+                      "w", encoding="utf-8") as f:
+                f.write("\n".join(idx) + "\n")
+
+        sidx = [frontmatter("Schema", schema, f"Schema {schema} in {DATABASE}.",
+                            ["postgres", slug(schema), "index"], timestamp)]
+        sidx.append(f"# {schema}\n")
+        for folder, label in [("tables", "Tables"), ("views", "Views"), ("routines", "Routines")]:
+            if folders[folder]:
+                sidx.append(f"- [{label}]({folder}/index.md) — {len(set(folders[folder]))}")
+        with open(os.path.join(OUT_DIR, slug(schema), "index.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(sidx) + "\n")
+
+    root = [frontmatter("Database", DATABASE,
+                        f"Schema knowledge bundle for the postgres database {DATABASE} on {HOST}.",
+                        ["postgres", "schema"], timestamp)]
+    root.append(f"# {DATABASE}\n")
+    root.append(f"Provider: **postgres**  |  Host: `{HOST}`  |  Generated: {timestamp}\n")
+    root.append("> Row counts are approximate. Where statistics were unavailable they are planner "
+                "estimates from pg_class.reltuples — treat them as order-of-magnitude only.\n")
+    root.append("## Schemas\n")
+    for schema in sorted(written):
+        f_ = written[schema]
+        root.append(f"- [{schema}]({slug(schema)}/index.md) — "
+                    f"{len(set(f_['tables']))} tables, {len(set(f_['views']))} views, "
+                    f"{len(set(f_['routines']))} routines")
+    with open(os.path.join(OUT_DIR, "index.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(root) + "\n")
+
+    t = sum(len(set(written[s]["tables"])) for s in written)
+    v = sum(len(set(written[s]["views"])) for s in written)
+    rt = sum(len(set(written[s]["routines"])) for s in written)
+    print(f"Wrote OKF bundle to {OUT_DIR}/ ({t} tables, {v} views, {rt} routines)")
+
+
+if __name__ == "__main__":
+    main()
