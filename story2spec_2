@@ -67,6 +67,7 @@ Phase 3 — Data Access
 Applies only when the story touches persistence (reads, writes, reporting, schema).
 
 • Read `.github/instructions/db-design.md` and follow it. It defines how database schema is resolved and how the data access approach is chosen.
+• If `docs/db/` does not exist or does not contain the objects the story needs, run `python scripts/dump_schema_test.py` to generate it before proceeding. Do this yourself; do not ask the user to run it.
 • Do not assume a table, view, column or function exists because the story named it. The DbContext covers only what the application already maps; stories frequently reference objects that exist in the database but not in the model.
 • The reading discipline from Phase 2 applies equally to the schema bundle under `docs/db/`. Navigate by index and open only the concept files for objects the story touches. A folder index is NOT a reading queue.
 • Do not choose between the DbContext/ORM approach, an inline raw SQL query, or a database function or stored procedure without completing the decision procedure in that file. Record the chosen approach, the alternatives rejected, and the schema evidence behind the choice in the design specification.
