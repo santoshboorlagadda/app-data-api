@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+"""
+Dump database schema to a markdown snapshot the design agent can read.
+
+Works against SQL Server, PostgreSQL and Oracle. The provider is detected from the
+connection string found in appsettings*.json, so the same command works in every
+application repository without per-app configuration.
+
+    python scripts/dump_schema.py                          # auto-discover appsettings
+    python scripts/dump_schema.py --list                   # show what it found, connect to nothing
+    python scripts/dump_schema.py --config src/Api/appsettings.Development.json
+    python scripts/dump_schema.py --name TradeStore        # pick a named connection
+    python scripts/dump_schema.py --objects Trades,vw_Book # limit to these objects
+
+Credential resolution, first hit wins:
+    1. DB_CONNECTION_STRING environment variable
+    2. DB_USER / DB_PASSWORD environment variables, merged over the appsettings values
+    3. the connection string in appsettings*.json
+
+${VAR} and %VAR% placeholders inside a connection string are expanded from the
+environment, so repos that keep secrets out of source still work.
+
+The password is never printed and never written to the snapshot.
+
+Drivers — install only what your applications actually use:
+    pip install "psycopg[binary]"   # PostgreSQL
+    pip install pyodbc              # SQL Server (also needs MS ODBC Driver 18 at OS level)
+    pip install oracledb            # Oracle
+"""
+import argparse
+import datetime as dt
+import glob
+import json
+import os
+import re
+import sys
+
+# --------------------------------------------------------------------------
+# provider detection
+# --------------------------------------------------------------------------
+
+PROVIDER_HINTS = [
+    ("postgres", ["host=", "username=", "port=5432"]),
+    ("sqlserver", ["initial catalog=", "integrated security=", "trustservercertificate=", "server=tcp:"]),
+    ("oracle", ["(description", "(service_name=", "user id="]),
+]
+
+SYNONYMS = {
+    "host":     ["server", "host", "data source", "addr", "address", "network address"],
+    "port":     ["port"],
+    "database": ["database", "initial catalog", "dbname", "db"],
+    "user":     ["user id", "uid", "username", "user"],
+    "password": ["password", "pwd"],
+}
+
+DEFAULT_PORT = {"postgres": "5432", "sqlserver": "1433", "oracle": "1521"}
+
+
+def expand_placeholders(value):
+    def sub(match):
+        name = match.group(1) or match.group(2)
+        return os.environ.get(name, match.group(0))
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|%([A-Za-z_][A-Za-z0-9_]*)%", sub, value)
+
+
+def parse_connection_string(cs):
+    parts = {}
+    for chunk in cs.split(";"):
+        if "=" not in chunk:
+            continue
+        key, _, value = chunk.partition("=")
+        parts[key.strip().lower()] = value.strip()
+    return parts
+
+
+def detect_provider(cs, parts, explicit=None):
+    if explicit:
+        return explicit
+    lowered = cs.lower()
+    for provider, tokens in PROVIDER_HINTS:
+        if any(token in lowered for token in tokens):
+            return provider
+    if "host" in parts and "username" in parts:
+        return "postgres"
+    if "initial catalog" in parts or "server" in parts:
+        return "sqlserver"
+    if "data source" in parts and "user id" in parts:
+        return "oracle"
+    return None
+
+
+def pick(parts, component):
+    for key in SYNONYMS[component]:
+        if key in parts and parts[key]:
+            return parts[key]
+    return None
+
+
+def split_host_port(host, provider):
+    """SQL Server writes server,port. Others write host:port."""
+    if host is None:
+        return None, None
+    if provider == "sqlserver" and "," in host:
+        h, _, p = host.partition(",")
+        return h.strip(), p.strip()
+    if provider != "sqlserver" and host.count(":") == 1:
+        h, _, p = host.partition(":")
+        return h.strip(), p.strip()
+    return host.strip(), None
+
+
+# --------------------------------------------------------------------------
+# appsettings discovery
+# --------------------------------------------------------------------------
+
+SEARCH_GLOBS = ["appsettings*.json", "src/**/appsettings*.json", "**/appsettings*.json"]
+
+
+def find_config_files(explicit):
+    if explicit:
+        if not os.path.exists(explicit):
+            sys.exit(f"Config file not found: {explicit}")
+        return [explicit]
+    seen, found = set(), []
+    for pattern in SEARCH_GLOBS:
+        for path in glob.glob(pattern, recursive=True):
+            norm = path.replace("\\", "/")
+            if "/bin/" in norm or "/obj/" in norm:
+                continue
+            real = os.path.realpath(path)
+            if real in seen:
+                continue
+            seen.add(real)
+            found.append(path)
+    return found
+
+
+def load_connections(paths):
+    """Return [(file, name, connection_string)] from every ConnectionStrings section."""
+    out = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  skipped {path}: {exc}", file=sys.stderr)
+            continue
+        section = data.get("ConnectionStrings") or data.get("connectionStrings") or {}
+        if isinstance(section, dict):
+            for name, value in section.items():
+                if isinstance(value, str) and "=" in value:
+                    out.append((path, name, value))
+    return out
+
+
+def resolve_connection(args):
+    env_cs = os.environ.get("DB_CONNECTION_STRING")
+    if env_cs:
+        cs = expand_placeholders(env_cs)
+        parts = parse_connection_string(cs)
+        return detect_provider(cs, parts, args.provider), parts, "DB_CONNECTION_STRING"
+
+    candidates = load_connections(find_config_files(args.config))
+    if not candidates:
+        sys.exit(
+            "No connection string found.\n"
+            "Looked for a ConnectionStrings section in appsettings*.json.\n"
+            "Pass --config <path>, or set DB_CONNECTION_STRING."
+        )
+
+    if args.name:
+        candidates = [c for c in candidates if c[1].lower() == args.name.lower()]
+        if not candidates:
+            sys.exit(f"No connection named '{args.name}' found. Run --list to see the options.")
+    elif len({(n) for _, n, _ in candidates}) > 1:
+        names = ", ".join(sorted({f"{n} ({os.path.basename(p)})" for p, n, _ in candidates}))
+        sys.exit(
+            f"Multiple connection strings found: {names}\n"
+            "Re-run with --name <ConnectionName> to choose one."
+        )
+
+    path, name, raw = candidates[0]
+    cs = expand_placeholders(raw)
+    parts = parse_connection_string(cs)
+    provider = detect_provider(cs, parts, args.provider)
+
+    # Environment credentials override whatever is in the file.
+    if os.environ.get("DB_USER"):
+        for key in ("uid", "username", "user"):
+            parts.pop(key, None)
+        parts["user id"] = os.environ["DB_USER"]
+    if os.environ.get("DB_PASSWORD"):
+        parts.pop("pwd", None)
+        parts["password"] = os.environ["DB_PASSWORD"]
+
+    return provider, parts, f"{path} -> {name}"
+
+
+# --------------------------------------------------------------------------
+# connect
+# --------------------------------------------------------------------------
+
+def connect(provider, parts):
+    raw_host = pick(parts, "host")
+    host, embedded_port = split_host_port(raw_host, provider)
+    port = embedded_port or pick(parts, "port") or DEFAULT_PORT.get(provider)
+    database = pick(parts, "database")
+    user = pick(parts, "user")
+    password = pick(parts, "password")
+
+    def unresolved(v):
+        return bool(v) and bool(re.search(r"\$\{[A-Za-z_]|%[A-Za-z_][A-Za-z0-9_]*%", v))
+
+    missing = [n for n, v in [("host", host), ("user", user), ("password", password)]
+               if not v or unresolved(v)]
+    if missing:
+        sys.exit(
+            f"Connection string is missing or unresolved: {', '.join(missing)}.\n"
+            "If secrets are supplied at runtime, set them before re-running:\n"
+            "  export DB_USER=...   export DB_PASSWORD=...\n"
+            "or export DB_CONNECTION_STRING with the full string."
+        )
+
+    driver_hint = {"postgres": 'pip install "psycopg[binary]"',
+                   "sqlserver": "pip install pyodbc  (plus MS ODBC Driver 18 at OS level)",
+                   "oracle": "pip install oracledb"}
+
+    def need(module):
+        try:
+            return __import__(module)
+        except ImportError:
+            sys.exit(f"Driver not installed for {provider}.\n  {driver_hint[provider]}")
+
+    if provider == "postgres":
+        psycopg = need("psycopg")
+        return psycopg.connect(host=host, port=port, dbname=database,
+                               user=user, password=password), host, database
+
+    if provider == "sqlserver":
+        pyodbc = need("pyodbc")
+        driver = os.environ.get("ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
+        return pyodbc.connect(
+            f"DRIVER={{{driver}}};SERVER={host},{port};DATABASE={database};"
+            f"UID={user};PWD={password};TrustServerCertificate=yes",
+            readonly=True,
+        ), host, database
+
+    if provider == "oracle":
+        oracledb = need("oracledb")
+        dsn = raw_host if (raw_host or "").strip().startswith("(") \
+            else f"{host}:{port}/{database or ''}"
+        return oracledb.connect(user=user, password=password, dsn=dsn), host, database
+
+    sys.exit("Could not determine the provider. Re-run with --provider postgres|sqlserver|oracle.")
+
+
+# --------------------------------------------------------------------------
+# catalog queries
+# --------------------------------------------------------------------------
+
+COLS = ["schema", "object", "kind", "column", "type", "length", "precision", "scale", "nullable"]
+KEYS = ["schema", "table", "type", "constraint", "column", "references"]
+ROWS = ["schema", "table", "approx_rows", "last_analyze"]
+ROUTINES = ["schema", "name", "kind", "arguments", "returns", "comment"]
+
+QUERIES = {
+    "postgres": {
+        "columns": ("""
+            SELECT c.table_schema, c.table_name, t.table_type, c.column_name, c.data_type,
+                   c.character_maximum_length, c.numeric_precision, c.numeric_scale, c.is_nullable
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+            WHERE c.table_schema NOT IN ('pg_catalog','information_schema')
+            ORDER BY c.table_schema, c.table_name, c.ordinal_position""", COLS),
+        "indexes": ("""
+            SELECT schemaname, tablename, indexname, indexdef
+            FROM pg_indexes
+            WHERE schemaname NOT IN ('pg_catalog','information_schema')
+            ORDER BY schemaname, tablename""",
+            ["schema", "table", "index", "definition"]),
+        "keys": ("""
+            SELECT tc.table_schema, tc.table_name, tc.constraint_type, tc.constraint_name,
+                   kcu.column_name, ccu.table_name
+            FROM information_schema.table_constraints tc
+            LEFT JOIN information_schema.key_column_usage kcu
+                   ON kcu.constraint_name = tc.constraint_name
+            LEFT JOIN information_schema.constraint_column_usage ccu
+                   ON ccu.constraint_name = tc.constraint_name AND tc.constraint_type = 'FOREIGN KEY'
+            WHERE tc.table_schema NOT IN ('pg_catalog','information_schema')
+              AND tc.constraint_type IN ('PRIMARY KEY','FOREIGN KEY','UNIQUE')""", KEYS),
+        "row_counts": ("""
+            SELECT schemaname, relname, n_live_tup, last_analyze
+            FROM pg_stat_user_tables
+            ORDER BY n_live_tup DESC""", ROWS),
+        "routines": ("""
+            SELECT n.nspname, p.proname,
+                   CASE p.prokind WHEN 'f' THEN 'FUNCTION' WHEN 'p' THEN 'PROCEDURE'
+                                  WHEN 'a' THEN 'AGGREGATE' ELSE 'OTHER' END,
+                   pg_get_function_arguments(p.oid),
+                   pg_get_function_result(p.oid),
+                   obj_description(p.oid, 'pg_proc')
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+            ORDER BY n.nspname, p.proname""", ROUTINES),
+    },
+    "sqlserver": {
+        "columns": ("""
+            SELECT s.name, t.name, t.type_desc, c.name, ty.name,
+                   c.max_length, c.precision, c.scale, c.is_nullable
+            FROM sys.objects t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.columns c ON c.object_id = t.object_id
+            JOIN sys.types ty ON ty.user_type_id = c.user_type_id
+            WHERE t.type IN ('U','V')
+            ORDER BY s.name, t.name, c.column_id""", COLS),
+        "indexes": ("""
+            SELECT s.name, t.name, i.name, i.type_desc, i.is_unique, i.is_primary_key,
+                   STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal)
+            FROM sys.indexes i
+            JOIN sys.tables t ON t.object_id = i.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+            JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+            WHERE i.type > 0
+            GROUP BY s.name, t.name, i.name, i.type_desc, i.is_unique, i.is_primary_key""",
+            ["schema", "table", "index", "kind", "unique", "primary_key", "columns"]),
+        "keys": ("""
+            SELECT SCHEMA_NAME(t.schema_id), OBJECT_NAME(fk.parent_object_id), 'FOREIGN KEY',
+                   fk.name, NULL, OBJECT_NAME(fk.referenced_object_id)
+            FROM sys.foreign_keys fk
+            JOIN sys.tables t ON t.object_id = fk.parent_object_id""", KEYS),
+        "row_counts": ("""
+            SELECT s.name, t.name, SUM(p.rows), NULL
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0,1)
+            GROUP BY s.name, t.name
+            ORDER BY SUM(p.rows) DESC""", ROWS),
+        "routines": ("""
+            SELECT s.name, o.name, o.type_desc,
+                   STUFF((SELECT ', ' + pa.name + ' ' + TYPE_NAME(pa.user_type_id)
+                          FROM sys.parameters pa
+                          WHERE pa.object_id = o.object_id AND pa.parameter_id > 0
+                          ORDER BY pa.parameter_id FOR XML PATH('')), 1, 2, ''),
+                   NULL, NULL
+            FROM sys.objects o
+            JOIN sys.schemas s ON s.schema_id = o.schema_id
+            WHERE o.type IN ('P','FN','IF','TF')
+            ORDER BY s.name, o.name""", ROUTINES),
+    },
+    "oracle": {
+        "columns": ("""
+            SELECT USER, c.table_name, o.object_type, c.column_name, c.data_type,
+                   c.data_length, c.data_precision, c.data_scale, c.nullable
+            FROM user_tab_columns c
+            JOIN user_objects o ON o.object_name = c.table_name
+            WHERE o.object_type IN ('TABLE','VIEW','MATERIALIZED VIEW')
+            ORDER BY c.table_name, c.column_id""", COLS),
+        "indexes": ("""
+            SELECT USER, i.table_name, i.index_name, i.index_type, i.uniqueness,
+                   LISTAGG(c.column_name, ',') WITHIN GROUP (ORDER BY c.column_position)
+            FROM user_indexes i
+            JOIN user_ind_columns c ON c.index_name = i.index_name
+            GROUP BY i.table_name, i.index_name, i.index_type, i.uniqueness""",
+            ["schema", "table", "index", "kind", "unique", "columns"]),
+        "keys": ("""
+            SELECT USER, c.table_name, c.constraint_type, c.constraint_name,
+                   cc.column_name, c.r_constraint_name
+            FROM user_constraints c
+            JOIN user_cons_columns cc ON cc.constraint_name = c.constraint_name
+            WHERE c.constraint_type IN ('P','R','U')""", KEYS),
+        "row_counts": ("""
+            SELECT USER, table_name, num_rows, last_analyzed
+            FROM user_tables
+            ORDER BY num_rows DESC""", ROWS),
+        "routines": ("""
+            SELECT USER, o.object_name, o.object_type,
+                   LISTAGG(a.argument_name || ' ' || a.data_type, ', ')
+                       WITHIN GROUP (ORDER BY a.position),
+                   NULL, NULL
+            FROM user_objects o
+            LEFT JOIN user_arguments a ON a.object_name = o.object_name
+            WHERE o.object_type IN ('FUNCTION','PROCEDURE','PACKAGE')
+            GROUP BY o.object_name, o.object_type
+            ORDER BY o.object_name""", ROUTINES),
+    },
+}
+
+
+def run(conn, sql):
+    cur = conn.cursor()
+    cur.execute(sql)
+    rows = cur.fetchall()
+    cur.close()
+    return [tuple(r) for r in rows]
+
+
+def keep(row, objects):
+    if not objects:
+        return True
+    return any(str(cell).upper() in objects for cell in row[:3] if cell is not None)
+
+
+def slug(name):
+    return re.sub(r"[^a-z0-9_]+", "_", str(name).lower()).strip("_")
+
+
+def md_table(rows, headers):
+    if not rows:
+        return "_none_\n"
+    out = ["| " + " | ".join(headers) + " |",
+           "|" + "|".join(["---"] * len(headers)) + "|"]
+    for r in rows:
+        cells = ["" if c is None else str(c).replace("|", "\\|") for c in r]
+        out.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out) + "\n"
+
+
+def yaml_escape(value):
+    value = str(value or "").replace('"', "'").replace("\n", " ")
+    return f'"{value}"'
+
+
+def frontmatter(concept_type, title, description, tags, timestamp, resource=None):
+    lines = ["---", f"type: {yaml_escape(concept_type)}", f"title: {yaml_escape(title)}",
+             f"description: {yaml_escape(description)}"]
+    if resource:
+        lines.append(f"resource: {yaml_escape(resource)}")
+    lines.append("tags: [" + ", ".join(tags) + "]")
+    lines.append(f"timestamp: {timestamp}")
+    lines.append("---")
+    return "\n".join(lines) + "\n"
+
+
+TYPE_NAME = {
+    "postgres": {"BASE TABLE": "PostgreSQL Table", "VIEW": "PostgreSQL View",
+                 "TABLE": "PostgreSQL Table"},
+    "sqlserver": {"USER_TABLE": "SQL Server Table", "VIEW": "SQL Server View"},
+    "oracle": {"TABLE": "Oracle Table", "VIEW": "Oracle View",
+               "MATERIALIZED VIEW": "Oracle Materialized View"},
+}
+
+
+def group(rows, key_index):
+    out = {}
+    for r in rows:
+        out.setdefault(r[key_index], []).append(r)
+    return out
+
+
+def write_bundle(out_dir, provider, host, database, sections, timestamp):
+    """Write an OKF v0.1 bundle: docs/db/<provider>/<schema>/{tables,views,routines}/<obj>.md"""
+    columns, _ = sections["columns"]
+    indexes, _ = sections["indexes"]
+    keys, _ = sections["keys"]
+    counts, _ = sections["row_counts"]
+    routines, _ = sections.get("routines", ([], []))
+
+    # lookups keyed by (schema, object) so two schemas never collide
+    idx_by, key_by, count_by = {}, {}, {}
+    for r in indexes:
+        idx_by.setdefault((r[0], r[1]), []).append(r)
+    for r in keys:
+        key_by.setdefault((r[0], r[1]), []).append(r)
+    for r in counts:
+        count_by[(r[0], r[1])] = (r[2], r[3])
+
+    objects = {}
+    for r in columns:
+        objects.setdefault((r[0], r[1], r[2]), []).append(r)
+
+    known = {(sch, name) for sch, name, _ in objects}
+    written = {}          # schema -> {"tables": [...], "views": [...], "routines": [...]}
+
+    def record(schema, folder, name):
+        written.setdefault(schema, {"tables": [], "views": [], "routines": []})[folder].append(name)
+
+    for (schema, name, kind), cols in sorted(objects.items()):
+        is_view = "VIEW" in str(kind).upper()
+        folder = "views" if is_view else "tables"
+        concept_type = TYPE_NAME.get(provider, {}).get(
+            str(kind).upper(), f"{provider} {'View' if is_view else 'Table'}")
+        approx, analyzed = count_by.get((schema, name), (None, None))
+
+        body = [frontmatter(
+            concept_type, f"{schema}.{name}",
+            f"{'View' if is_view else 'Table'} {schema}.{name} in {database or provider}.",
+            [provider, slug(schema), "schema"], timestamp)]
+        body.append(f"# {schema}.{name}\n")
+        if approx is not None:
+            note = f"Approximate rows: **{approx}**"
+            if analyzed:
+                note += f" (statistics last updated {analyzed})"
+            body.append(note + "\n")
+        elif not is_view:
+            body.append("Approximate rows: unknown — statistics unavailable.\n")
+
+        body.append("## Columns\n")
+        body.append(md_table([(c[3], c[4], c[5], c[6], c[7], c[8]) for c in cols],
+                             ["column", "type", "length", "precision", "scale", "nullable"]))
+
+        body.append("\n## Indexes\n")
+        rows = idx_by.get((schema, name), [])
+        body.append(md_table([r[2:] for r in rows],
+                             ["index"] + [f"detail{i}" for i in range(1, len(rows[0]) - 2)])
+                    if rows else "_none_\n")
+
+        body.append("\n## Keys and joins\n")
+        krows = key_by.get((schema, name), [])
+        if krows:
+            lines = ["| type | constraint | column | references |", "|---|---|---|---|"]
+            for k in krows:
+                ref = k[5]
+                if ref:
+                    # link within the same schema first, then any schema
+                    target = (schema, ref) if (schema, ref) in known else \
+                             next((o for o in known if o[1] == ref), None)
+                    if target:
+                        rel = f"{slug(ref)}.md" if target[0] == schema \
+                              else f"../../{slug(target[0])}/tables/{slug(ref)}.md"
+                        ref = f"[{ref}]({rel})"
+                lines.append(f"| {k[2]} | {k[3]} | {k[4] or ''} | {ref or ''} |")
+            body.append("\n".join(lines) + "\n")
+        else:
+            body.append("_none_\n")
+
+        path = os.path.join(out_dir, slug(schema), folder)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, f"{slug(name)}.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(body))
+        record(schema, folder, name)
+
+    # routines: one concept per function / procedure
+    for r in sorted(routines):
+        schema, name, kind, args, returns, comment = (list(r) + [None] * 6)[:6]
+        body = [frontmatter(
+            f"{provider} {str(kind).title()}", f"{schema}.{name}",
+            (comment or f"{str(kind).title()} {schema}.{name}.").replace("\n", " "),
+            [provider, slug(schema), "routine"], timestamp)]
+        body.append(f"# {schema}.{name}\n")
+        body.append(f"- Kind: `{kind}`")
+        body.append(f"- Arguments: `{args or 'none'}`")
+        if returns:
+            body.append(f"- Returns: `{returns}`")
+        body.append("\n> An existing routine. Prefer calling this over writing a new one that "
+                    "duplicates it. Read its definition in source control before proposing a change.\n")
+        path = os.path.join(out_dir, slug(schema), "routines")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, f"{slug(name)}.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(body))
+        record(schema, "routines", name)
+
+    # per-folder index files
+    for schema, folders in written.items():
+        for folder, label in [("tables", "Tables"), ("views", "Views"), ("routines", "Routines")]:
+            names = sorted(set(folders[folder]))
+            if not names:
+                continue
+            idx = [frontmatter("Index", f"{schema} {label}",
+                               f"{label} in schema {schema}.",
+                               [provider, slug(schema), "index"], timestamp)]
+            idx.append(f"# {schema} — {label}\n")
+            idx += [f"- [{n}]({slug(n)}.md)" for n in names]
+            with open(os.path.join(out_dir, slug(schema), folder, "index.md"),
+                      "w", encoding="utf-8") as f:
+                f.write("\n".join(idx) + "\n")
+
+        sidx = [frontmatter("Schema", schema, f"Schema {schema} in {database or provider}.",
+                            [provider, slug(schema), "index"], timestamp)]
+        sidx.append(f"# {schema}\n")
+        for folder, label in [("tables", "Tables"), ("views", "Views"), ("routines", "Routines")]:
+            if folders[folder]:
+                sidx.append(f"- [{label}]({folder}/index.md) — {len(set(folders[folder]))}")
+        with open(os.path.join(out_dir, slug(schema), "index.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(sidx) + "\n")
+
+    root = [frontmatter("Database", database or provider,
+                        f"Schema knowledge bundle for the {provider} database "
+                        f"{database or ''} on {host}.", [provider, "schema"], timestamp)]
+    root.append(f"# {database or provider}\n")
+    root.append(f"Provider: **{provider}**  |  Host: `{host}`  |  Generated: {timestamp}\n")
+    root.append("> Row counts are approximate and depend on current statistics "
+                "(ANALYZE on PostgreSQL, DBMS_STATS on Oracle). Check the statistics date on each "
+                "concept before relying on a count for a performance decision.\n")
+    root.append("## Schemas\n")
+    for schema in sorted(written):
+        f_ = written[schema]
+        root.append(f"- [{schema}]({slug(schema)}/index.md) — "
+                    f"{len(set(f_['tables']))} tables, {len(set(f_['views']))} views, "
+                    f"{len(set(f_['routines']))} routines")
+    with open(os.path.join(out_dir, "index.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(root) + "\n")
+
+    totals = [sum(len(set(written[s][k])) for s in written) for k in ("tables", "views", "routines")]
+    return totals
+
+
+def main():
+    p = argparse.ArgumentParser(description="Dump database schema as an OKF v0.1 knowledge bundle.")
+    p.add_argument("--config", help="path to a specific appsettings json file")
+    p.add_argument("--name", help="which named connection string to use")
+    p.add_argument("--provider", choices=["postgres", "sqlserver", "oracle"],
+                   help="override auto-detection")
+    p.add_argument("--objects", help="comma separated table/view names to include")
+    p.add_argument("--out", help="bundle directory (default docs/db/<provider>)")
+    p.add_argument("--list", action="store_true",
+                   help="list discovered connections and exit without connecting")
+    args = p.parse_args()
+
+    if args.list:
+        found = load_connections(find_config_files(args.config))
+        if not found:
+            print("No ConnectionStrings section found in any appsettings*.json")
+            return
+        for path, name, raw in found:
+            parts = parse_connection_string(expand_placeholders(raw))
+            provider = detect_provider(raw, parts) or "unknown"
+            host, _ = split_host_port(pick(parts, "host"), provider)
+            pwd = pick(parts, "password")
+            if not pwd:
+                has_pwd = "no (set DB_PASSWORD)"
+            elif re.search(r"\$\{[A-Za-z_]|%[A-Za-z_][A-Za-z0-9_]*%", pwd):
+                has_pwd = "placeholder (set that env var, or DB_PASSWORD)"
+            else:
+                has_pwd = "yes"
+            print(f"{path}: {name} -> provider={provider} host={host} "
+                  f"db={pick(parts, 'database')} password_in_file={has_pwd}")
+        return
+
+    provider, parts, source = resolve_connection(args)
+    if provider not in QUERIES:
+        sys.exit("Could not determine the provider. Re-run with --provider.")
+
+    conn, host, database = connect(provider, parts)
+    print(f"Connected: provider={provider} host={host} database={database} (from {source})")
+
+    objects = {o.strip().upper() for o in args.objects.split(",")} if args.objects else None
+    sections = {}
+    for key, (sql, headers) in QUERIES[provider].items():
+        try:
+            rows = [r for r in run(conn, sql) if keep(r, objects)]
+        except Exception as exc:                      # noqa: BLE001
+            rows = []
+            print(f"  {key}: query failed ({type(exc).__name__}) — "
+                  f"check the account has catalog read permission", file=sys.stderr)
+        sections[key] = (rows, headers)
+    conn.close()
+
+    out_dir = args.out or os.path.join("docs", "db", provider)
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    os.makedirs(out_dir, exist_ok=True)
+    n_t, n_v, n_r = write_bundle(out_dir, provider, host, database, sections, timestamp)
+    print(f"Wrote OKF bundle to {out_dir}/ ({n_t} tables, {n_v} views, {n_r} routines)")
+
+
+if __name__ == "__main__":
+    main()
