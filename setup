@@ -1,0 +1,270 @@
+# story2spec — setup and worked example
+
+## Files
+
+| File | Goes here | What it does |
+|---|---|---|
+| `story2spec.md` | `.github/agents/story2spec.md` | The agent. Reading discipline, when to stop and ask, and the design-document template. |
+| `db-design.md` | `.github/instructions/db-design.md` | Data-access rulebook. How schema is resolved, and how LINQ vs raw SQL vs view vs stored routine is decided. |
+| `dump_schema.py` | `scripts/dump_schema.py` | Reads the connection string from `appsettings*.json`, detects the provider, writes a schema snapshot. |
+| *(generated)* | `docs/db/<provider>/` | OKF v0.1 knowledge bundle — one markdown concept file per table and view. What the agent reads for objects not in the DbContext. |
+
+---
+
+## Step 1 — Put the files in the repo
+
+```
+your-repo/
+├── .github/
+│   ├── agents/
+│   │   └── story2spec.md
+│   └── instructions/
+│       └── db-design.md
+├── scripts/
+│   └── dump_schema.py
+└── docs/
+    └── db/
+        └── postgres/                    # generated: an OKF v0.1 bundle
+            ├── index.md                 # lists the schemas
+            ├── sales/
+            │   ├── index.md
+            │   ├── tables/
+            │   │   ├── index.md
+            │   │   ├── trades.md
+            │   │   └── books.md
+            │   ├── views/
+            │   │   ├── index.md
+            │   │   └── vw_position_valuation.md
+            │   └── routines/
+            │       ├── index.md
+            │       └── fn_order_totals.md
+            └── staging/
+                └── ...
+```
+
+VS Code picks up any `.md` file in `.github/agents` as a custom agent — no special suffix needed.
+
+## Step 2 — Install the driver
+
+```bash
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+
+pip install "psycopg[binary]"        # PostgreSQL
+pip install pyodbc                   # SQL Server — also needs MS ODBC Driver 18 at OS level
+pip install oracledb                 # Oracle
+```
+
+Only the driver for the databases you actually dump. The script itself uses only the standard library.
+
+## Step 3 — Check what the script sees, before connecting
+
+```bash
+python scripts/dump_schema.py --list
+```
+
+Output looks like:
+
+```
+src/Api/appsettings.Development.json: Thanos -> provider=postgres host=pg-dev.internal db=thanos password_in_file=yes
+```
+
+**Check the host.** If it points at production, stop and use `--config` to select a development
+settings file instead. `--list` never connects, so it is safe to run first.
+
+If the password shows as `placeholder`, set the environment variable the connection string names,
+or set `DB_PASSWORD` to override it:
+
+```bash
+export DB_PASSWORD=...
+```
+
+Use a **read-only** account. On PostgreSQL:
+
+```sql
+CREATE ROLE schema_reader LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE thanos TO schema_reader;
+GRANT USAGE ON SCHEMA public TO schema_reader;
+GRANT pg_read_all_stats TO schema_reader;   -- needed for row counts
+```
+
+## Step 4 — Generate the snapshot
+
+```bash
+python scripts/dump_schema.py
+# Connected: provider=postgres host=pg-dev.internal database=thanos
+# Wrote OKF bundle to docs/db/postgres/ (100 tables, 50 views, 50 routines)
+```
+
+Narrow it if the database is large:
+
+```bash
+python scripts/dump_schema.py --objects trades,trade_leg,vw_position
+```
+
+Run `ANALYZE;` first if statistics may be stale — the row counts drive the performance decision, and
+stale numbers produce confident wrong answers.
+
+## Step 5 — Decide whether the snapshot is committed
+
+Committing it means the agent finds the schema with no database access at all, and schema drift shows
+up in pull requests as a per-table diff — one file changed per altered object, which reviews well.
+
+Committing is usually right. If table names themselves are sensitive, gitignore `docs/db/` and have
+each developer generate their own bundle.
+
+## Step 6 — Enable the terminal tool in VS Code
+
+The agent's frontmatter lists `runCommands`. If the agent cannot run the script, open
+`story2spec.md`, click **Configure Tools** in the Chat view, and tick the terminal tool — VS Code
+writes the correct tool name for your version. A tool name that does not resolve is ignored
+silently, which is why this fails quietly rather than erroring.
+
+Leave approvals at the default at first, so you see each command before it runs.
+
+## Step 7 — Run it
+
+Open Copilot Chat, pick **story2spec** from the agents dropdown, and give it a story.
+
+---
+
+## Worked example
+
+**The story**
+
+> **US-4821 — Position summary by book**
+> As a trader I want a summary of my positions grouped by book, showing net quantity, average price
+> and unrealised P&L, filtered by as-of date, so I can see exposure at a glance.
+> AC1: Endpoint `GET /api/positions/summary?bookId=&asOf=`
+> AC2: Returns net quantity, average price, unrealised P&L per instrument
+> AC3: Responds within 500 ms for a book with 50,000 trades
+
+**What the agent does**
+
+*Phase 1* — reads the story. No work-item tool, so it asks you to paste linked items if AC references
+them.
+
+*Phase 2* — declares scope before opening anything:
+
+```
+Primary scope:   src/Thanos.Api (endpoint), src/Thanos.Domain/Positions (query logic)
+Secondary:       src/Thanos.Data/ThanosDbContext.cs — read only, to confirm mapped entities
+Scope mapping:   "position summary" -> Positions feature folder; "book" -> Book entity
+```
+
+Then searches for `Position` and `Book`, opens only the located line ranges.
+
+*Phase 2b* — the story needs `vw_position_valuation`, which is not in the DbContext. It runs:
+
+```bash
+python scripts/dump_schema.py --list
+python scripts/dump_schema.py --objects trades,vw_position_valuation,books
+```
+
+then navigates the bundle: `docs/db/postgres/index.md` → `sales/index.md` →
+`sales/views/index.md` → `sales/views/vw_position_valuation.md`, follows the foreign-key link from
+`sales/tables/trades.md` to `sales/tables/books.md`, and checks `sales/routines/index.md` for an
+existing function covering the same job. Four concept files out of 200 — not the whole bundle.
+
+`tables/trades.md` reads:
+
+```markdown
+---
+type: "PostgreSQL Table"
+title: "trades"
+description: "Table public.trades in thanos."
+tags: [postgres, public, schema]
+timestamp: 2026-08-19T06:10:00Z
+---
+
+# public.trades
+
+Approximate rows: **4180000** (statistics last updated 2026-08-19)
+
+## Indexes
+| index | detail1 |
+|---|---|
+| idx_trades_book_date | btree (book_id, trade_date) |
+
+## Keys and joins
+| type | constraint | column | references |
+|---|---|---|---|
+| FOREIGN KEY | fk_trades_book | book_id | [books](../tables/books.md) |
+```
+
+*The decision* — it works through §4 of `db-design.md`:
+
+- Step 1, hard constraints: single provider, view is owned by the platform team → no schema change proposed.
+- Step 2, classify: read-only; 2 tables + 1 view; aggregation already done inside the view; single statement; hot path; 4.18M rows in `trades` but the view filters by `book_id` + `as_of`, which `idx_trades_book_date` covers; expected result ~50 rows.
+- Step 3, table: the aggregation lives in the view, so the application query is a filtered read over a keyless entity — **LINQ**.
+- Step 4, evidence gate: it has row counts and index coverage from the snapshot, so the recommendation is validated rather than asserted.
+- Step 5: raw SQL rejected (the view already handles the joins); stored procedure rejected (single read, no multi-statement transaction, logic not shared).
+
+**What lands in `designs/US-4821/design.md`**
+
+```markdown
+Status: READY
+
+## 7. Data access
+
+Provider: PostgreSQL 15. Single provider.
+
+Objects:
+| Object | Kind | Resolved from |
+|---|---|---|
+| [trades](../../docs/db/postgres/tables/trades.md) | table | DbContext (Trade) |
+| [books](../../docs/db/postgres/tables/books.md) | table | DbContext (Book) |
+| [vw_position_valuation](../../docs/db/postgres/views/vw_position_valuation.md) | view | OKF bundle — NOT in DbContext |
+
+Gap: map vw_position_valuation as a keyless entity (HasNoKey) in ThanosDbContext.
+Read-only, no migration required. Owned by the platform team — do not alter.
+
+Approach: EF Core LINQ over the keyless entity.
+Justification: decision table row 1 — single read, aggregation already performed in
+the view, ~50 rows returned.
+
+Evidence: trades ≈ 4.18M rows; idx_trades_book_date (book_id, trade_date) covers the
+view's filter; result set ~50 rows for a typical book. Validated against the OKF bundle
+generated 2026-08-19.
+
+Alternatives rejected:
+- Raw SQL — the view already encapsulates the joins; no CTE or window function needed.
+- Stored procedure — single SELECT, no multi-statement transaction, not shared with
+  other systems. Would add deployment and versioning cost for no gain.
+
+Query shape:
+    db.PositionValuations
+      .AsNoTracking()
+      .Where(p => p.BookId == bookId && p.AsOf == asOf)
+      .Select(p => new PositionSummaryDto(p.InstrumentId, p.NetQty, p.AvgPrice, p.UnrealisedPnl))
+      .ToListAsync(ct)
+
+Transactions: none — read-only path.
+
+Test plan: unit test the projection with an in-memory list; integration test against a
+seeded PostgreSQL container asserting AC3 (< 500 ms with 50k trades in scope).
+```
+
+**Contrast — the same story without the snapshot**
+
+The agent cannot resolve `vw_position_valuation`. It stops and asks:
+
+> I can't resolve `vw_position_valuation` from the DbContext, migrations, or the OKF bundle, and
+> `scripts/dump_schema.py` reports no connection string. Please either run the dump script, or give
+> me the view's columns, the underlying tables, their indexes, and approximate row counts.
+
+Running unattended, it writes the document with `Status: BLOCKED` and that question under Open
+Questions instead of inventing columns.
+
+---
+
+## If something does not work
+
+| Symptom | Cause |
+|---|---|
+| Agent not in the dropdown | File not under `.github/agents/`, or workspace not trusted |
+| Agent never runs the script | Terminal tool not resolving — use **Configure Tools** |
+| `Multiple connection strings found` | Pass `--name <ConnectionName>` |
+| `Driver not installed` | Run the `pip install` line the script printed |
+| Row counts all zero | Statistics stale (`ANALYZE`) or missing `pg_read_all_stats` |
+| Agent invents tables | Bundle missing and it was run unattended — check for `Status: BLOCKED` |
